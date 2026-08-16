@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import importlib
 import io
 import os
 import re
@@ -16,7 +17,30 @@ import sec_nongaap as ng
 
 
 APP_NAME = "SEC Earnings 8-K Non-GAAP Analyzer"
-APP_VERSION = ng.APP_VERSION
+REQUIRED_ENGINE_API = (
+    "enrich_adjustments",
+    "build_adjustment_tieouts",
+    "make_adjustment_metric_matrix",
+    "adjustment_category_summary",
+    "make_adjustment_value_matrix",
+    "make_adjustment_presence_matrix",
+    "compare_adjustment_periods",
+)
+
+
+def _reload_engine_if_needed() -> tuple[object, list[str]]:
+    """Reload the local engine when Streamlit retained an older imported module."""
+    module = ng
+    missing = [name for name in REQUIRED_ENGINE_API if not callable(getattr(module, name, None))]
+    if missing:
+        importlib.invalidate_caches()
+        module = importlib.reload(module)
+        missing = [name for name in REQUIRED_ENGINE_API if not callable(getattr(module, name, None))]
+    return module, missing
+
+
+ng, ENGINE_API_MISSING = _reload_engine_if_needed()
+APP_VERSION = getattr(ng, "APP_VERSION", "unknown")
 
 st.set_page_config(
     page_title=APP_NAME,
@@ -129,6 +153,19 @@ CUSTOM_CSS = """
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
+if ENGINE_API_MISSING:
+    loaded_path = getattr(ng, "__file__", "unknown module path")
+    st.error(
+        "The deployed app loaded an incompatible copy of sec_nongaap.py. "
+        "Upload app.py and sec_nongaap.py from the same release, then reboot the Streamlit app."
+    )
+    st.code(
+        f"Loaded engine: {loaded_path}\n"
+        f"Engine version: {APP_VERSION}\n"
+        f"Missing functions: {', '.join(ENGINE_API_MISSING)}"
+    )
+    st.stop()
+
 
 STATE_DEFAULTS: dict[str, Any] = {
     "issuer_matches": pd.DataFrame(),
@@ -140,10 +177,18 @@ STATE_DEFAULTS: dict[str, Any] = {
     "analysis_years": [],
     "loaded_cik": None,
     "loaded_contact": "",
+    "engine_version": None,
 }
 for state_key, default_value in STATE_DEFAULTS.items():
     if state_key not in st.session_state:
         st.session_state[state_key] = default_value
+
+# A code upgrade can leave a prior session's analysis object in memory. Clear only
+# derived analysis state when the engine version changes; issuer search inputs stay intact.
+if st.session_state.get("engine_version") != APP_VERSION:
+    st.session_state.analysis = None
+    st.session_state.analysis_years = []
+    st.session_state.engine_version = APP_VERSION
 
 
 @st.cache_resource(show_spinner=False)

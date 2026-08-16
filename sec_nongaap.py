@@ -26,7 +26,7 @@ SEC_COMPANY_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 SEC_SIC_LIST = "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.1"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
