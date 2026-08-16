@@ -1,5 +1,7 @@
-streamlit>=1.40
+streamlit>=1.42
 pandas>=2.2
 requests>=2.32
 beautifulsoup4>=4.12
-lxml>=5.0
+lxml>=5.3
+pypdf>=5.0
+openpyxl>=3.1

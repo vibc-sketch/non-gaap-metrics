@@ -1,426 +1,1138 @@
+from __future__ import annotations
+
+import html
 import io
-import re
-import time
 import os
-import math
-from typing import Optional
+import re
+from datetime import date, datetime, timezone
+from typing import Any, Optional
 
 import pandas as pd
-import requests
 import streamlit as st
-from bs4 import BeautifulSoup
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
-SEC_HEADERS = {
-    "User-Agent": os.getenv("SEC_USER_AGENT", "SEC Non-GAAP Metrics Explorer/1.0; contact: you@example.com"),
-    "Accept-Encoding": "gzip, deflate",
-    "Host": "www.sec.gov",
+import sec_nongaap as ng
+
+
+APP_NAME = "SEC Earnings 8-K Non-GAAP Analyzer"
+APP_VERSION = ng.APP_VERSION
+
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon="\U0001F4CA",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+CUSTOM_CSS = """
+<style>
+:root {
+  --app-blue: #1f4e78;
+  --app-teal: #157a6e;
+  --app-gold: #b7791f;
+  --app-border: rgba(128, 128, 128, 0.25);
 }
-DATA_HEADERS = {**SEC_HEADERS, "Host": "data.sec.gov"}
+.block-container {
+  max-width: 1500px;
+  padding-top: 1.35rem;
+  padding-bottom: 3rem;
+}
+[data-testid="stSidebar"] {
+  min-width: 310px;
+}
+.app-kicker {
+  color: #3b82f6;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  margin-bottom: 0.15rem;
+}
+.source-rule {
+  border: 1px solid rgba(31, 78, 120, 0.35);
+  border-left: 5px solid var(--app-blue);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  background: rgba(31, 78, 120, 0.07);
+  margin: 0.6rem 0 1.15rem 0;
+}
+.info-card {
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  min-height: 108px;
+  background: rgba(128, 128, 128, 0.035);
+}
+.info-label {
+  font-size: 0.76rem;
+  opacity: 0.68;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+.info-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+}
+.info-note {
+  font-size: 0.78rem;
+  opacity: 0.72;
+  margin-top: 0.35rem;
+}
+.recon-card {
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  padding: 0.8rem 0.9rem;
+  min-height: 102px;
+  background: rgba(128, 128, 128, 0.025);
+}
+.recon-card .label {
+  font-size: 0.76rem;
+  opacity: 0.68;
+  text-transform: uppercase;
+}
+.recon-card .value {
+  font-size: 1.14rem;
+  font-weight: 700;
+  margin-top: 0.25rem;
+}
+.small-note {
+  font-size: 0.83rem;
+  opacity: 0.72;
+}
+.success-note {
+  border-left: 4px solid var(--app-teal);
+  padding: 0.55rem 0.8rem;
+  background: rgba(21, 122, 110, 0.07);
+  border-radius: 8px;
+}
+.warning-note {
+  border-left: 4px solid var(--app-gold);
+  padding: 0.55rem 0.8rem;
+  background: rgba(183, 121, 31, 0.08);
+  border-radius: 8px;
+}
+@media (max-width: 760px) {
+  .block-container {
+    padding-left: 0.8rem;
+    padding-right: 0.8rem;
+    padding-top: 0.8rem;
+  }
+  h1 { font-size: 1.75rem !important; }
+  h2 { font-size: 1.35rem !important; }
+  .info-card { min-height: 90px; }
+}
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-st.set_page_config(page_title="SEC Non-GAAP Metrics Explorer", page_icon="📊", layout="wide")
+
+STATE_DEFAULTS: dict[str, Any] = {
+    "issuer_matches": pd.DataFrame(),
+    "company": None,
+    "submissions": None,
+    "filings": pd.DataFrame(),
+    "anchors": pd.DataFrame(),
+    "analysis": None,
+    "analysis_years": [],
+    "loaded_cik": None,
+    "loaded_contact": "",
+}
+for state_key, default_value in STATE_DEFAULTS.items():
+    if state_key not in st.session_state:
+        st.session_state[state_key] = default_value
 
 
-def set_contact(email: str):
-    if email.strip():
-        ua = f"SEC Non-GAAP Metrics Explorer/1.0; {email.strip()}"
-        SEC_HEADERS["User-Agent"] = ua
-        DATA_HEADERS["User-Agent"] = ua
+@st.cache_resource(show_spinner=False)
+def get_client(contact_email: str) -> ng.SecClient:
+    return ng.SecClient(contact_email=contact_email, app_name=APP_NAME)
 
 
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def sec_get_json(url: str, data_api: bool = False):
-    headers = DATA_HEADERS if data_api else SEC_HEADERS
-    r = requests.get(url, headers=headers, timeout=45)
-    r.raise_for_status()
-    time.sleep(0.15)
-    return r.json()
+def esc(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""))
 
 
-@st.cache_data(ttl=7 * 24 * 3600, show_spinner=False)
-def sec_get_text(url: str):
-    r = requests.get(url, headers=SEC_HEADERS, timeout=60)
-    r.raise_for_status()
-    time.sleep(0.15)
-    return r.text
+def clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
 
 
-@st.cache_data(ttl=30 * 24 * 3600, show_spinner=False)
-def load_company_tickers():
-    data = sec_get_json("https://www.sec.gov/files/company_tickers.json")
-    rows = []
-    for x in data.values():
-        rows.append({"cik": int(x["cik_str"]), "ticker": str(x.get("ticker", "")).upper(), "name": x.get("title", "")})
-    df = pd.DataFrame(rows)
-    return df.sort_values(["name", "ticker"]).reset_index(drop=True)
-
-
-@st.cache_data(ttl=30 * 24 * 3600, show_spinner=False)
-def load_sic_codes():
-    url = "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
-    html = sec_get_text(url)
+def format_date(value: Any) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
     try:
-        tables = pd.read_html(io.StringIO(html))
-    except ValueError:
-        return pd.DataFrame(columns=["sic", "industry_title"])
-    if not tables:
-        return pd.DataFrame(columns=["sic", "industry_title"])
-    df = tables[0].copy()
-    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-    sic_col = next((c for c in df.columns if "sic" in c), None)
-    ind_col = next((c for c in df.columns if "industry" in c and "title" in c), None)
-    if not sic_col or not ind_col:
-        return pd.DataFrame(columns=["sic", "industry_title"])
-    out = df[[sic_col, ind_col]].rename(columns={sic_col: "sic", ind_col: "industry_title"})
-    out["sic"] = out["sic"].astype(str).str.extract(r"(\d+)")[0]
-    return out.dropna().drop_duplicates()
+        return pd.Timestamp(value).strftime("%Y-%m-%d")
+    except Exception:
+        return clean_text(value)
 
 
-@st.cache_data(ttl=30 * 24 * 3600, show_spinner=False)
-def browse_edgar_sic(sic_code: str):
-    url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&sic={sic_code}&owner=exclude&count=100"
-    html = sec_get_text(url)
-    soup = BeautifulSoup(html, "html.parser")
-    rows = []
-    for a in soup.find_all("a", href=True):
-        href = a.get("href", "")
-        m = re.search(r"CIK=(\d+)", href, re.I)
-        txt = re.sub(r"\s+", " ", a.get_text(" ", strip=True))
-        if m and txt:
-            rows.append({"cik": int(m.group(1)), "name": txt})
-    return pd.DataFrame(rows).drop_duplicates("cik") if rows else pd.DataFrame(columns=["cik", "name"])
+def fye_display(value: str) -> str:
+    digits = re.sub(r"[^0-9]", "", value or "")
+    if len(digits) == 4:
+        return f"{digits[:2]}/{digits[2:]}"
+    return value or "Not reported"
 
 
-@st.cache_data(ttl=30 * 24 * 3600, show_spinner=False)
-def load_company_submissions(cik: int):
-    return sec_get_json(f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json", data_api=True)
+def period_sort_key(period: str) -> tuple[int, int]:
+    match = re.search(r"FY(\d{4})\s+Q([1-4])", period or "")
+    if not match:
+        return (0, 0)
+    return int(match.group(1)), int(match.group(2))
 
 
-def recent_filings(submissions: dict) -> pd.DataFrame:
-    rec = submissions.get("filings", {}).get("recent", {}) or {}
-    # Never assume all SEC arrays are present; construct a stable schema for the UI.
-    if not isinstance(rec, dict) or not rec:
-        return pd.DataFrame(columns=["form", "filingDate", "filed", "reportDate", "acceptanceDateTime", "act", "fileNumber", "filmNumber", "items", "coreg", "size", "isXBRL", "isInlineXBRL", "isXBRL", "isInlineXBRL", "accessionNumber", "primaryDocument", "primaryDocDescription", "form", "fileNumber", "filmNumber", "items", "coreg"])
-    df = pd.DataFrame(rec)
-    # Keep canonical column names and add safe fallbacks for missing metadata.
-    for c in ["form", "accessionNumber", "primaryDocument", "reportDate", "filed", "fy", "fp", "frame"]:
-        if c not in df.columns:
-            df[c] = pd.NA
-    for c in ["filed", "reportDate"]:
-        df[c] = pd.to_datetime(df[c], errors="coerce")
-    return df
+def render_info_card(label: str, value: Any, note: str = "") -> None:
+    st.markdown(
+        f"""
+        <div class="info-card">
+          <div class="info-label">{esc(label)}</div>
+          <div class="info-value">{esc(value)}</div>
+          <div class="info-note">{esc(note)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def fiscal_year_from_date(report_date, fy_end: str):
-    if pd.isna(report_date):
-        return None
+def render_recon_card(label: str, value: Any, note: str = "") -> None:
+    st.markdown(
+        f"""
+        <div class="recon-card">
+          <div class="label">{esc(label)}</div>
+          <div class="value">{esc(value)}</div>
+          <div class="info-note">{esc(note)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def reset_loaded_issuer() -> None:
+    st.session_state.company = None
+    st.session_state.submissions = None
+    st.session_state.filings = pd.DataFrame()
+    st.session_state.anchors = pd.DataFrame()
+    st.session_state.analysis = None
+    st.session_state.analysis_years = []
+    st.session_state.loaded_cik = None
+    st.session_state.loaded_contact = ""
+
+
+def normalized_value(row: pd.Series) -> Optional[float]:
     try:
-        d = pd.Timestamp(report_date)
-        if fy_end and re.fullmatch(r"\d{4}", str(fy_end)):
-            m = int(str(fy_end)[:2]); day = int(str(fy_end)[2:])
-            # fiscal year is the year in which the fiscal-year-end occurs.
-            return d.year if (d.month, d.day) <= (m, day) else d.year + 1
-        return d.year
+        value = float(row.get("non_gaap_value"))
     except Exception:
         return None
+    return ng.normalize_value(value, clean_text(row.get("scale")), clean_text(row.get("unit")))
 
 
-def fiscal_period_from_dates(report_date, fy_end: str):
-    if pd.isna(report_date) or not fy_end or not re.fullmatch(r"\d{4}", str(fy_end)):
-        return "N/A"
-    try:
-        d = pd.Timestamp(report_date)
-        m = int(str(fy_end)[:2]); day = int(str(fy_end)[2:])
-        end = pd.Timestamp(year=d.year, month=m, day=day)
-        if d > end:
-            end = end.replace(year=end.year + 1)
-        months_back = (end.year - d.year) * 12 + (end.month - d.month)
-        # Quarter ending closest to 3/6/9/12 months before fiscal-year-end.
-        q = min(4, max(1, 4 - int(round(months_back / 3.0))))
-        return f"Q{q}"
-    except Exception:
-        return "N/A"
+def format_change(current: Optional[float], prior: Optional[float], unit: str) -> str:
+    if current is None or prior is None or pd.isna(current) or pd.isna(prior):
+        return ""
+    delta = float(current) - float(prior)
+    if unit == "percent":
+        return f"{delta:+,.1f} pp"
+    if unit == "bps":
+        return f"{delta:+,.0f} bps"
+    if float(prior) == 0:
+        return "n/m"
+    return f"{((float(current) / float(prior)) - 1.0) * 100:+,.1f}%"
 
 
-def normalized_period(row, fy_end: str):
-    raw_fy = row.get("fy")
-    raw_fp = row.get("fp")
-    fy = None
-    if pd.notna(raw_fy):
-        try: fy = int(raw_fy)
-        except Exception: pass
-    if not fy:
-        fy = fiscal_year_from_date(row.get("reportDate"), fy_end)
-    fp = str(raw_fp).upper() if pd.notna(raw_fp) else ""
-    if fp not in {"Q1", "Q2", "Q3", "Q4", "FY"}:
-        fp = "FY" if str(row.get("form", "")).startswith("10-K") else fiscal_period_from_dates(row.get("reportDate"), fy_end)
-    return fy, fp
+def add_change_columns(reconciliations: pd.DataFrame) -> pd.DataFrame:
+    if reconciliations.empty:
+        return reconciliations.copy()
 
+    data = reconciliations.copy()
+    data["quarter_order"] = data["fiscal_quarter"].map(ng.QUARTER_ORDER)
+    data["normalized_non_gaap"] = data.apply(normalized_value, axis=1)
+    data = data.sort_values(["metric", "fiscal_year", "quarter_order", "confidence"])
+    data = data.drop_duplicates(["metric", "fiscal_year", "fiscal_quarter"], keep="first")
 
-def filing_url(cik: int, accession: str, primary_doc: str):
-    return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/{primary_doc}"
+    lookup: dict[tuple[str, int, str], pd.Series] = {}
+    for _, row in data.iterrows():
+        lookup[(str(row["metric"]), int(row["fiscal_year"]), str(row["fiscal_quarter"]))] = row
 
-
-def index_url(cik: int, accession: str):
-    return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/{accession}-index.htm"
-
-
-def extract_exhibits_from_filing(cik: int, accession: str):
-    html = sec_get_text(index_url(cik, accession))
-    soup = BeautifulSoup(html, "html.parser")
-    rows = []
-    for tr in soup.find_all("tr"):
-        a = tr.find("a", href=True)
-        cells = tr.find_all(["td", "th"])
-        if not a or len(cells) < 2:
-            continue
-        desc = " | ".join(re.sub(r"\s+", " ", c.get_text(" ", strip=True)) for c in cells)
-        href = a.get("href", "")
-        if href.startswith("/"):
-            url = "https://www.sec.gov" + href
-        elif href.startswith("http"):
-            url = href
+    qoq_changes: list[str] = []
+    yoy_changes: list[str] = []
+    for _, row in data.iterrows():
+        metric = str(row["metric"])
+        fiscal_year = int(row["fiscal_year"])
+        quarter = str(row["fiscal_quarter"])
+        quarter_number = ng.QUARTER_ORDER.get(quarter, 0)
+        if quarter_number > 1:
+            previous_q_key = (metric, fiscal_year, f"Q{quarter_number - 1}")
         else:
-            url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/{href}"
-        doc = a.get_text(" ", strip=True)
-        if re.search(r"EX-99\.[0-9]+|99\.[0-9]+|press release|earnings|financial results|results of operations", desc, re.I):
-            rows.append({"document": doc, "description": desc, "url": url})
-    # De-duplicate while preserving order.
-    seen = set(); out = []
-    for r in rows:
-        if r["url"] not in seen:
-            seen.add(r["url"]); out.append(r)
-    return out
+            previous_q_key = (metric, fiscal_year - 1, "Q4")
+        previous_y_key = (metric, fiscal_year - 1, quarter)
+        previous_q = lookup.get(previous_q_key)
+        previous_y = lookup.get(previous_y_key)
+        current_value = row.get("normalized_non_gaap")
+        unit = clean_text(row.get("unit"))
+        qoq_changes.append(
+            format_change(current_value, previous_q.get("normalized_non_gaap") if previous_q is not None else None, unit)
+        )
+        yoy_changes.append(
+            format_change(current_value, previous_y.get("normalized_non_gaap") if previous_y is not None else None, unit)
+        )
+
+    data["qoq_change"] = qoq_changes
+    data["yoy_change"] = yoy_changes
+    return data.drop(columns=["quarter_order"], errors="ignore")
 
 
-def clean_text(html):
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript"]): tag.decompose()
-    return re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
-
-
-def metric_family(text: str):
-    t = text.lower()
-    rules = [
-        ("Adjusted EBITDA", ["adjusted ebitda", "adjusted earnings before interest"]),
-        ("Adjusted EPS", ["adjusted eps", "non-gaap eps", "adjusted earnings per share"]),
-        ("Adjusted Net Income", ["adjusted net income", "non-gaap net income"]),
-        ("Free Cash Flow", ["free cash flow", "fcf"]),
-        ("Adjusted Operating Income", ["adjusted operating income"]),
-        ("Organic Revenue", ["organic revenue", "organic sales"]),
-        ("Constant Currency", ["constant currency"]),
-        ("Net Debt / Leverage", ["net debt", "leverage ratio"]),
-        ("Non-GAAP", ["non-gaap", "non gaap"]),
-    ]
-    for label, needles in rules:
-        if any(x in t for x in needles): return label
-    return "Other Non-GAAP"
-
-
-def extract_non_gaap(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    out = []
-    seen = set()
-
-    def add(family, text, source_type, label=""):
-        text = re.sub(r"\s+", " ", text).strip()
-        key = text.lower()
-        if not text or key in seen or len(text) > 1200:
-            return
-        seen.add(key)
-        out.append({"metric_family": family or metric_family(text), "metric_label": label, "disclosure": text, "source_type": source_type})
-
-    for table in soup.find_all("table"):
-        for tr in table.find_all("tr"):
-            vals = [re.sub(r"\s+", " ", x.get_text(" ", strip=True)) for x in tr.find_all(["th", "td"])]
-            if not vals: continue
-            joined = " | ".join(vals)
-            if re.search(r"adjusted|non[- ]gaap|free cash flow|ebitda|organic|constant currency|net debt|leverage|pro forma|underlying|normalized", joined, re.I):
-                label = vals[0][:160]
-                add(metric_family(joined), joined, "table", label)
-
-    text = clean_text(html)
-    # Pull a useful window around each key metric phrase rather than a brittle value regex.
-    patterns = [
-        r"(?:adjusted ebitda|adjusted eps|adjusted earnings per share|adjusted net income|free cash flow|non[- ]gaap|organic revenue|constant currency|net debt|leverage)[^.;]{0,320}",
-    ]
-    for pat in patterns:
-        for m in re.finditer(pat, text, re.I):
-            snippet = m.group(0)
-            add(metric_family(snippet), snippet, "narrative", snippet[:120])
-    return out[:500]
-
-
-def extract_filing_data(cik, filings, fy_end, selected_years):
-    if filings.empty:
-        return pd.DataFrame()
-    forms = {"8-K", "8-K/A", "10-K", "10-Q", "10-Q/A", "S-1", "S-1/A"}
-    f = filings[filings["form"].isin(forms)].copy()
-    f["norm_fy"] = f.apply(lambda r: normalized_period(r, fy_end)[0], axis=1)
-    f["norm_fp"] = f.apply(lambda r: normalized_period(r, fy_end)[1], axis=1)
-    f = f[f["norm_fy"].isin(selected_years)]
-    rows = []
-    for _, r in f.sort_values(["norm_fy", "norm_fp", "filed"], ascending=[False, True, False]).iterrows():
-        acc = r.get("accessionNumber"); doc = r.get("primaryDocument")
-        if pd.isna(acc) or pd.isna(doc): continue
-        form = str(r.get("form", ""))
-        primary_url = filing_url(cik, acc, doc)
-        try:
-            exhibits = extract_exhibits_from_filing(cik, acc)
-        except Exception:
-            exhibits = []
-        # 10-K/10-Q often contain MD&A but earnings-release data is normally in 8-K exhibits.
-        candidates = exhibits
-        if not candidates and form in {"10-K", "10-Q", "10-Q/A", "S-1", "S-1/A"}:
-            candidates = [{"document": str(doc), "description": "Primary filing", "url": primary_url}]
-        # For 8-K, prioritize earnings/financial-results exhibits.
-        candidates = sorted(candidates, key=lambda x: (0 if re.search(r"EX-99|press release|earnings|financial results", x["description"], re.I) else 1, x["document"]))
-        for ex in candidates[:8]:
-            try:
-                html = sec_get_text(ex["url"])
-                hits = extract_non_gaap(html)
-            except Exception:
-                hits = []
-            for hit in hits:
-                rows.append({
-                    "fiscal_year": int(r["norm_fy"]) if pd.notna(r["norm_fy"]) else None,
-                    "fiscal_period": r["norm_fp"],
-                    "filing_form": form,
-                    "filing_date": pd.Timestamp(r["filed"]).date().isoformat() if pd.notna(r["filed"]) else "",
-                    "report_date": pd.Timestamp(r["reportDate"]).date().isoformat() if pd.notna(r["reportDate"]) else "",
-                    "metric_family": hit["metric_family"],
-                    "metric_label": hit["metric_label"],
-                    "disclosure": hit["disclosure"],
-                    "source_type": hit["source_type"],
-                    "source_url": ex["url"],
-                    "filing_url": primary_url,
-                })
-    return pd.DataFrame(rows)
-
-
-def search_companies(query="", sic="", industry="", limit=50):
-    tickers = load_company_tickers()
-    q = (query or "").strip().upper()
-    if q:
-        df = tickers[tickers["ticker"].str.contains(re.escape(q), na=False) | tickers["name"].str.upper().str.contains(re.escape(q), na=False)].copy()
+def chart_frame(trends: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str]:
+    selected = trends[trends["metric"].eq(metric)].copy()
+    if selected.empty:
+        return pd.DataFrame(), ""
+    selected["quarter_order"] = selected["fiscal_quarter"].map(ng.QUARTER_ORDER)
+    selected = selected.sort_values(["fiscal_year", "quarter_order"])
+    unit = clean_text(selected.iloc[0].get("unit"))
+    if unit == "usd":
+        selected["chart_value"] = selected["normalized_non_gaap"] / 1_000_000.0
+        unit_label = "USD millions"
+    elif unit == "percent":
+        selected["chart_value"] = selected["non_gaap_value"]
+        unit_label = "Percent"
+    elif unit == "usd_per_share":
+        selected["chart_value"] = selected["non_gaap_value"]
+        unit_label = "USD per share"
+    elif unit == "bps":
+        selected["chart_value"] = selected["non_gaap_value"]
+        unit_label = "Basis points"
     else:
-        df = tickers.copy()
-    if sic.strip().isdigit():
-        sic_df = browse_edgar_sic(sic.strip())
-        df = df[df["cik"].isin(sic_df["cik"])] if not sic_df.empty else df.iloc[0:0]
-    elif industry.strip():
-        sic_df = load_sic_codes()
-        matches = sic_df[sic_df["industry_title"].str.contains(re.escape(industry.strip()), case=False, na=False)]
-        frames = []
-        for code in matches["sic"].head(20).tolist():
-            try: frames.append(browse_edgar_sic(code))
-            except Exception: pass
-        if frames:
-            ids = pd.concat(frames)["cik"].drop_duplicates()
-            df = df[df["cik"].isin(ids)]
-        else:
-            df = df.iloc[0:0]
-    return df.head(limit).reset_index(drop=True)
+        selected["chart_value"] = selected["non_gaap_value"]
+        unit_label = "Reported value"
+    return selected[["period", "chart_value"]].set_index("period"), unit_label
 
 
-def company_record(cik):
-    sub = load_company_submissions(cik)
-    return {
-        "cik": int(cik), "name": sub.get("name", ""), "ticker": ", ".join(sub.get("tickers", []) or []),
-        "sic": str(sub.get("sic", "")), "sic_description": sub.get("sicDescription", ""),
-        "fiscal_year_end": str(sub.get("fiscalYearEnd", "")),
+def display_dataframe(
+    frame: pd.DataFrame,
+    column_config: Optional[dict[str, Any]] = None,
+    height: Optional[int] = None,
+) -> None:
+    if frame.empty:
+        st.info("No records are available for this section.")
+        return
+    dataframe_kwargs: dict[str, Any] = {
+        "data": frame,
+        "use_container_width": True,
+        "hide_index": True,
+        "column_config": column_config or {},
     }
+    if height is not None:
+        dataframe_kwargs["height"] = height
+    st.dataframe(**dataframe_kwargs)
 
-# UI
-st.title("SEC Non-GAAP Metrics Explorer")
-st.caption("Search public issuers by name, ticker, SIC, or industry; pull quarterly non-GAAP disclosures and normalize them to the issuer's fiscal calendar.")
+
+def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
+    data = frame.copy()
+    for column in data.columns:
+        if pd.api.types.is_datetime64_any_dtype(data[column]):
+            data[column] = data[column].dt.strftime("%Y-%m-%d")
+        elif data[column].dtype == "object":
+            data[column] = data[column].map(
+                lambda value: format_date(value)
+                if isinstance(value, (date, datetime, pd.Timestamp))
+                else clean_text(value)
+            )
+    return data
+
+
+def style_data_sheet(worksheet: Any, header_row: int = 1) -> None:
+    dark_fill = PatternFill("solid", fgColor="1F4E78")
+    light_fill = PatternFill("solid", fgColor="D9EAF7")
+    header_font = Font(color="FFFFFF", bold=True)
+    link_font = Font(color="0563C1", underline="single")
+    thin_border = Border(bottom=Side(style="thin", color="9EADBA"))
+
+    worksheet.sheet_view.showGridLines = False
+    worksheet.freeze_panes = f"A{header_row + 1}"
+    max_column = worksheet.max_column
+    max_row = worksheet.max_row
+    if max_row >= header_row:
+        worksheet.auto_filter.ref = f"A{header_row}:{get_column_letter(max_column)}{max_row}"
+
+    for cell in worksheet[header_row]:
+        cell.fill = dark_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    worksheet.row_dimensions[header_row].height = 30
+
+    for column_index in range(1, max_column + 1):
+        header = clean_text(worksheet.cell(header_row, column_index).value).lower()
+        max_length = len(clean_text(worksheet.cell(header_row, column_index).value))
+        for row_index in range(header_row + 1, max_row + 1):
+            cell = worksheet.cell(row_index, column_index)
+            value = clean_text(cell.value)
+            max_length = max(max_length, min(len(value), 80))
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            if row_index % 2 == 0:
+                cell.fill = light_fill
+            if "url" in header and value.startswith("http"):
+                cell.hyperlink = value
+                cell.font = link_font
+        worksheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_length + 2, 12), 55)
+
+
+def build_excel_export(
+    company: dict[str, Any],
+    selected_years: list[int],
+    analysis: dict[str, pd.DataFrame],
+    matrix: pd.DataFrame,
+    trends: pd.DataFrame,
+) -> bytes:
+    output = io.BytesIO()
+    additional = analysis.get("mentions", pd.DataFrame())
+    if not additional.empty and "status" in additional.columns:
+        additional = additional[additional["status"].eq("Additional non-GAAP measure")].copy()
+
+    summary = pd.DataFrame(
+        {
+            "Field": [
+                "Company",
+                "Ticker",
+                "CIK",
+                "SIC",
+                "Industry",
+                "Fiscal year end",
+                "Fiscal years analyzed",
+                "Source rule",
+                "Generated at UTC",
+                "App version",
+            ],
+            "Value": [
+                company.get("name", ""),
+                company.get("ticker", ""),
+                company.get("cik", ""),
+                company.get("sic", ""),
+                company.get("sic_description", ""),
+                company.get("fiscal_year_end", ""),
+                ", ".join(str(year) for year in sorted(selected_years)),
+                "Metrics come only from matched earnings 8-K EX-99 exhibits; 10-Q/10-K filings supply fiscal-period metadata.",
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                APP_VERSION,
+            ],
+        }
+    )
+
+    sheets: list[tuple[str, pd.DataFrame]] = [
+        ("Summary", summary),
+        ("Metric matrix", matrix),
+        ("Trend analysis", trends),
+        ("Reconciliations", analysis.get("reconciliations", pd.DataFrame())),
+        ("Adjustments", analysis.get("adjustments", pd.DataFrame())),
+        ("Additional measures", additional),
+        ("Coverage", analysis.get("coverage", pd.DataFrame())),
+        ("Source audit", analysis.get("sources", pd.DataFrame())),
+        ("Evidence", analysis.get("evidence", pd.DataFrame())),
+        ("Warnings", analysis.get("warnings", pd.DataFrame())),
+    ]
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, frame in sheets:
+            safe_frame = excel_ready(frame) if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+            if safe_frame.empty:
+                safe_frame = pd.DataFrame({"Message": ["No records extracted for this section."]})
+            safe_frame.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+        workbook = writer.book
+        for worksheet in workbook.worksheets:
+            style_data_sheet(worksheet)
+        summary_sheet = workbook["Summary"]
+        summary_sheet["A1"].font = Font(bold=True)
+        summary_sheet["B1"].font = Font(bold=True)
+
+    return output.getvalue()
+
+
+def compact_reconciliation_view(trends: pd.DataFrame) -> pd.DataFrame:
+    if trends.empty:
+        return pd.DataFrame()
+    columns = [
+        "period",
+        "metric",
+        "gaap_display",
+        "adjustment_display",
+        "non_gaap_display",
+        "qoq_change",
+        "yoy_change",
+        "source_role",
+        "confidence",
+        "source_url",
+    ]
+    available = [column for column in columns if column in trends.columns]
+    view = trends[available].copy()
+    return view.rename(
+        columns={
+            "period": "Fiscal period",
+            "metric": "Non-GAAP metric",
+            "gaap_display": "GAAP",
+            "adjustment_display": "Total adjustments",
+            "non_gaap_display": "Non-GAAP",
+            "qoq_change": "QoQ change",
+            "yoy_change": "YoY change",
+            "source_role": "Source type",
+            "confidence": "Parse confidence",
+            "source_url": "SEC source",
+        }
+    )
+
+
+def coverage_view(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+    columns = [
+        "period",
+        "period_end",
+        "periodic_form",
+        "periodic_filing_date",
+        "earnings_8k_filing_date",
+        "source_documents",
+        "reconciled_metrics",
+        "additional_measures",
+        "status",
+        "earnings_8k_url",
+        "periodic_url",
+    ]
+    available = [column for column in columns if column in frame.columns]
+    view = frame[available].copy()
+    for column in ["period_end", "periodic_filing_date", "earnings_8k_filing_date"]:
+        if column in view.columns:
+            view[column] = view[column].map(format_date)
+    return view.rename(
+        columns={
+            "period": "Fiscal period",
+            "period_end": "Period end",
+            "periodic_form": "Anchor filing",
+            "periodic_filing_date": "10-Q/10-K filed",
+            "earnings_8k_filing_date": "Earnings 8-K filed",
+            "source_documents": "EX-99 documents checked",
+            "reconciled_metrics": "Metrics extracted",
+            "additional_measures": "Other measures",
+            "status": "Status",
+            "earnings_8k_url": "Earnings 8-K",
+            "periodic_url": "Anchor 10-Q/10-K",
+        }
+    )
+
+
+def source_audit_view(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+    columns = [
+        "period",
+        "document_role",
+        "content_type",
+        "has_reconciliation",
+        "document",
+        "description",
+        "8k_filing_date",
+        "document_url",
+        "8k_index_url",
+    ]
+    available = [column for column in columns if column in frame.columns]
+    view = frame[available].copy()
+    if "8k_filing_date" in view.columns:
+        view["8k_filing_date"] = view["8k_filing_date"].map(format_date)
+    if "has_reconciliation" in view.columns:
+        view["has_reconciliation"] = view["has_reconciliation"].map(lambda value: "Yes" if bool(value) else "No")
+    return view.rename(
+        columns={
+            "period": "Fiscal period",
+            "document_role": "Document role",
+            "content_type": "Format",
+            "has_reconciliation": "Reconciliation found",
+            "document": "Document",
+            "description": "Description",
+            "8k_filing_date": "8-K filed",
+            "document_url": "Exhibit source",
+            "8k_index_url": "8-K filing index",
+        }
+    )
+
+
+st.markdown('<div class="app-kicker">Evidence-first SEC filing analysis</div>', unsafe_allow_html=True)
+st.title(APP_NAME)
+st.caption(
+    "Structured GAAP-to-non-GAAP reconciliations, adjustment bridges, and additional non-GAAP callouts by issuer fiscal quarter."
+)
+st.markdown(
+    """
+    <div class="source-rule">
+      <strong>Source rule:</strong> Reported metrics are extracted only from the matched earnings Form 8-K and its EX-99 exhibits,
+      including HTML press releases, financial supplements, and PDF investor presentations. Forms 10-Q and 10-K are used only
+      to establish the issuer fiscal year, fiscal quarter, and the earnings-event matching window.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 with st.sidebar:
-    st.header("Issuer search")
-    lookup = st.text_input("Name or ticker", placeholder="e.g. LSCC or Lattice Semiconductor")
-    sic = st.text_input("SIC code (optional)", placeholder="e.g. 3674")
-    industry = st.text_input("Industry keyword (optional)", placeholder="e.g. semiconductors")
-    contact = st.text_input("SEC contact email", value=os.getenv("SEC_CONTACT_EMAIL", ""), placeholder="you@example.com")
-    if st.button("Find issuers", type="primary", use_container_width=True):
-        if not any(x.strip() for x in [lookup, sic, industry]):
-            st.warning("Enter a name/ticker, SIC code, or industry keyword.")
+    st.header("1. Search issuer")
+    default_contact = os.getenv("SEC_CONTACT_EMAIL", "")
+    contact_email = st.text_input(
+        "SEC contact email",
+        value=default_contact,
+        placeholder="name@company.com",
+        help="The SEC asks automated users to identify themselves in the User-Agent header. The app does not save this email.",
+    )
+
+    with st.form("issuer_search_form", clear_on_submit=False):
+        query = st.text_input("Company name or ticker", placeholder="LSCC or Lattice Semiconductor")
+        sic = st.text_input("SIC code (optional)", placeholder="3674")
+        industry = st.text_input("Industry keyword (optional)", placeholder="Semiconductors")
+        search_clicked = st.form_submit_button("Find issuers", use_container_width=True)
+
+    if search_clicked:
+        if not ng.SecClient.valid_contact(contact_email):
+            st.error("Enter a valid contact email before querying SEC data.")
+        elif not any(clean_text(value) for value in [query, sic, industry]):
+            st.error("Enter a company/ticker, SIC code, or industry keyword.")
         else:
             try:
-                set_contact(contact)
-                with st.spinner("Searching SEC issuer universe…"):
-                    st.session_state["issuer_search"] = search_companies(lookup, sic, industry)
-            except Exception as e:
-                st.error(f"Search failed: {e}")
-    st.markdown("**Sources**")
-    st.write("8-K / 8-K-A, 10-K / 10-Q / amendments, S-1 / S-1-A exhibits")
+                with st.spinner("Searching SEC issuer data..."):
+                    client = get_client(contact_email.strip())
+                    matches = ng.search_companies(
+                        client,
+                        query=query,
+                        sic=sic,
+                        industry=industry,
+                        limit=100,
+                    )
+                st.session_state.issuer_matches = matches
+                reset_loaded_issuer()
+                if matches.empty:
+                    st.warning("No issuer matches were found. Try a ticker, a broader company name, or a different industry keyword.")
+                else:
+                    st.success(f"Found {len(matches):,} issuer match(es).")
+            except Exception as exc:
+                st.error(f"Issuer search failed: {exc}")
 
-results = st.session_state.get("issuer_search", pd.DataFrame())
-if not results.empty:
-    st.subheader("Issuer matches")
-    options = {i: f"{r['name']} ({r['ticker'] or 'no ticker'}) — CIK {r['cik']}" for i, r in results.iterrows()}
-    choice = st.selectbox("Select an issuer", list(options.keys()), format_func=lambda i: options[i])
-    if st.button("Load issuer filings", use_container_width=True):
-        st.session_state["selected_cik"] = int(results.loc[choice, "cik"])
+    matches = st.session_state.issuer_matches
+    selected_cik: Optional[int] = None
+    if isinstance(matches, pd.DataFrame) and not matches.empty:
+        st.divider()
+        st.header("2. Select issuer")
+        option_ciks = [int(value) for value in matches["cik"].tolist()]
+        lookup = matches.set_index("cik").to_dict("index")
 
-cik = st.session_state.get("selected_cik")
-if cik:
-    try:
-        company = company_record(cik)
-        filings = recent_filings(load_company_submissions(cik))
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Company", company["name"][:30])
-        c2.metric("Ticker", company["ticker"] or "—")
-        c3.metric("SIC", company["sic"] or "—")
-        c4.metric("Fiscal year end", company["fiscal_year_end"] or "—")
+        def issuer_label(cik_value: int) -> str:
+            item = lookup.get(cik_value, {})
+            return f"{item.get('name', '')} ({item.get('ticker', '')}) - CIK {cik_value}"
 
-        # Make a normalized metadata table before any .unique()/astype operation.
-        filings["norm_fy"] = filings.apply(lambda r: normalized_period(r, company["fiscal_year_end"])[0], axis=1)
-        filings["norm_fp"] = filings.apply(lambda r: normalized_period(r, company["fiscal_year_end"])[1], axis=1)
-        years = sorted({int(x) for x in filings["norm_fy"].dropna().tolist() if int(x) > 0}, reverse=True)
-        if not years:
-            st.warning("SEC did not return fiscal-year metadata for this issuer. The app can still use report dates, but no fiscal-year filter is available.")
-        default_years = years[:2]
-        selected_years = st.multiselect("Fiscal years", years, default=default_years, max_selections=2)
-        include_s1 = st.checkbox("Include S-1 / S-1-A", value=True)
-        forms = {"8-K", "8-K/A", "10-K", "10-Q", "10-Q/A"} | ({"S-1", "S-1/A"} if include_s1 else set())
-        filt = filings[filings["form"].isin(forms)].copy()
-        if selected_years:
-            filt = filt[filt["norm_fy"].isin(selected_years)]
-        st.write(f"**{len(filt)}** relevant filings in the selected fiscal years.")
-        if not filt.empty:
-            st.dataframe(filt[["form", "filed", "reportDate", "norm_fy", "norm_fp", "accessionNumber", "primaryDocument"]], use_container_width=True, height=260)
-
-        if st.button("Pull non-GAAP analysis", type="primary", use_container_width=True):
-            if not selected_years:
-                st.warning("Select at least one fiscal year.")
+        selected_cik = st.selectbox("Issuer matches", options=option_ciks, format_func=issuer_label)
+        load_clicked = st.button("Load fiscal periods", use_container_width=True, type="primary")
+        if load_clicked:
+            if not ng.SecClient.valid_contact(contact_email):
+                st.error("Enter a valid contact email before loading filings.")
             else:
-                with st.spinner("Reading SEC filings and earnings-release exhibits…"):
-                    data = extract_filing_data(cik, filings, company["fiscal_year_end"], selected_years)
-                st.session_state["metrics"] = data
+                try:
+                    status = st.status("Loading issuer and fiscal-period metadata...", expanded=True)
+                    client = get_client(contact_email.strip())
+                    submissions = ng.load_company_submissions(client, int(selected_cik))
+                    status.update(label="Loading recent filing history...", state="running")
+                    filings = ng.load_all_filings(client, submissions, years_back=5, max_history_files=5)
 
-        data = st.session_state.get("metrics", pd.DataFrame())
-        if not data.empty:
-            st.subheader("Quarter-by-quarter non-GAAP analysis")
-            # Coverage grid
-            cov = data.groupby(["fiscal_year", "fiscal_period"]).size().reset_index(name="disclosures")
-            cov["period"] = cov["fiscal_year"].astype(str) + " " + cov["fiscal_period"]
-            st.dataframe(cov[["period", "disclosures"]], use_container_width=True, hide_index=True)
+                    def anchor_progress(message: str) -> None:
+                        status.update(label=message, state="running")
 
-            # Executive summary by metric family and quarter.
-            summary = data.groupby(["metric_family", "fiscal_year", "fiscal_period"]).size().reset_index(name="disclosure_count")
-            st.markdown("### Metric coverage")
-            st.dataframe(summary.sort_values(["fiscal_year", "fiscal_period", "metric_family"], ascending=[False, True, True]), use_container_width=True, hide_index=True)
+                    company = ng.company_record(submissions)
+                    anchors = ng.build_period_anchors(
+                        client,
+                        int(selected_cik),
+                        filings,
+                        company.get("fiscal_year_end", ""),
+                        max_periodic_filings=20,
+                        progress=anchor_progress,
+                    )
+                    st.session_state.company = company
+                    st.session_state.submissions = submissions
+                    st.session_state.filings = filings
+                    st.session_state.anchors = anchors
+                    st.session_state.analysis = None
+                    st.session_state.analysis_years = []
+                    st.session_state.loaded_cik = int(selected_cik)
+                    st.session_state.loaded_contact = contact_email.strip()
+                    status.update(label="Issuer loaded.", state="complete", expanded=False)
+                    if anchors.empty:
+                        st.warning("No recent 10-Q/10-K fiscal-period anchors were found for this issuer.")
+                except Exception as exc:
+                    st.error(f"Could not load issuer filings: {exc}")
 
-            st.markdown("### Evidence")
-            shown = data.sort_values(["fiscal_year", "fiscal_period", "metric_family", "filing_date"], ascending=[False, True, True, False]).copy()
-            st.dataframe(shown[["fiscal_year", "fiscal_period", "metric_family", "metric_label", "disclosure", "filing_form", "source_type", "source_url", "filing_url"]], use_container_width=True, height=560,
-                         column_config={"source_url": st.column_config.LinkColumn("Source"), "filing_url": st.column_config.LinkColumn("Filing")}, hide_index=True)
-            st.download_button("Download normalized CSV", data.to_csv(index=False).encode("utf-8"), file_name=f"{company['ticker'] or cik}_non_gaap_analysis.csv", mime="text/csv")
-        elif selected_years:
-            st.info("No non-GAAP disclosures were extracted yet. Click 'Pull non-GAAP analysis'.")
-    except requests.HTTPError as e:
-        st.error(f"SEC request failed: {e}. Add a real SEC contact email and retry.")
-    except Exception as e:
-        st.exception(e)
+    if st.session_state.company:
+        st.divider()
+        st.header("3. Analyze")
+        anchors = st.session_state.anchors
+        available_years = (
+            sorted({int(value) for value in anchors.get("fiscal_year", pd.Series(dtype=int)).dropna().tolist()}, reverse=True)
+            if isinstance(anchors, pd.DataFrame) and not anchors.empty
+            else []
+        )
+        default_years = available_years[:2]
+        selected_years = st.multiselect(
+            "Fiscal years (maximum two)",
+            options=available_years,
+            default=default_years,
+            max_selections=2,
+            help="The latest two fiscal years are selected by default. Current fiscal years may contain fewer than four quarters.",
+        )
+        max_exhibits = st.slider(
+            "Maximum EX-99 exhibits per earnings 8-K",
+            min_value=3,
+            max_value=12,
+            value=8,
+            help="Press releases, financial supplements, investor presentations, and other EX-99 exhibits are considered.",
+        )
+        analyze_clicked = st.button("Run 8-K reconciliation analysis", use_container_width=True, type="primary")
+        if analyze_clicked:
+            if not selected_years:
+                st.error("Select at least one fiscal year.")
+            elif len(selected_years) > 2:
+                st.error("Select no more than two fiscal years.")
+            elif contact_email.strip() != st.session_state.loaded_contact:
+                st.error("The SEC contact email changed. Reload the issuer so all requests use the same contact identity.")
+            else:
+                try:
+                    status = st.status("Starting 8-K analysis...", expanded=True)
+                    client = get_client(contact_email.strip())
 
-st.markdown("---")
-st.caption("Non-GAAP extraction is evidence-preserving and heuristic. Always review the linked SEC filing/exhibit before relying on a metric for investment, valuation, or reporting.")
+                    def analysis_progress(message: str) -> None:
+                        status.update(label=message, state="running")
+
+                    analysis = ng.analyze_company_quarters(
+                        client,
+                        int(st.session_state.loaded_cik),
+                        st.session_state.filings,
+                        st.session_state.anchors,
+                        [int(year) for year in selected_years],
+                        progress=analysis_progress,
+                        max_exhibits_per_8k=int(max_exhibits),
+                    )
+                    st.session_state.analysis = analysis
+                    st.session_state.analysis_years = [int(year) for year in selected_years]
+                    status.update(label="Analysis complete.", state="complete", expanded=False)
+                except Exception as exc:
+                    st.error(f"The analysis could not be completed: {exc}")
+
+    st.divider()
+    st.caption(f"Version {APP_VERSION}. SEC filing data is public. This tool is for research and review, not investment advice.")
+
+
+company = st.session_state.company
+if not company:
+    st.subheader("Start with an issuer search")
+    st.write(
+        "Enter a ticker such as **LSCC**, a company name, a four-digit SIC code, or an industry keyword in the left sidebar. "
+        "After selecting an issuer, the app will identify fiscal quarters from its 10-Q/10-K metadata and then analyze only the matched earnings 8-K exhibits."
+    )
+    st.markdown(
+        """
+        **The results are organized into:**
+
+        - a two-year quarterly metric matrix;
+        - structured GAAP, adjustment, and non-GAAP values;
+        - quarter-over-quarter and year-over-year movement;
+        - additional non-GAAP measures discussed in the release, supplement, or investor presentation; and
+        - an audit trail linking every result to the SEC source document.
+        """
+    )
+    st.stop()
+
+
+st.subheader("Issuer profile")
+profile_columns = st.columns(5)
+with profile_columns[0]:
+    render_info_card("Company", company.get("name", ""), company.get("exchange", ""))
+with profile_columns[1]:
+    render_info_card("Ticker", company.get("ticker", ""), f"CIK {company.get('cik', '')}")
+with profile_columns[2]:
+    render_info_card("SIC", company.get("sic", ""), company.get("sic_description", ""))
+with profile_columns[3]:
+    render_info_card("Fiscal year end", fye_display(company.get("fiscal_year_end", "")), "Inline XBRL controls period labels when available")
+with profile_columns[4]:
+    anchor_count = len(st.session_state.anchors) if isinstance(st.session_state.anchors, pd.DataFrame) else 0
+    render_info_card("Fiscal periods found", anchor_count, "10-Q/10-K metadata anchors")
+
+anchors = st.session_state.anchors
+if isinstance(anchors, pd.DataFrame) and not anchors.empty:
+    with st.expander("Review fiscal-period normalization", expanded=False):
+        anchor_view = anchors.copy()
+        anchor_view["period"] = anchor_view.apply(
+            lambda row: f"FY{int(row['fiscal_year'])} {row['fiscal_quarter']}", axis=1
+        )
+        for column in ["period_end", "periodic_filing_date"]:
+            anchor_view[column] = anchor_view[column].map(format_date)
+        anchor_view = anchor_view[
+            [
+                "period",
+                "period_end",
+                "periodic_form",
+                "periodic_filing_date",
+                "metadata_source",
+                "periodic_url",
+            ]
+        ].rename(
+            columns={
+                "period": "Fiscal period",
+                "period_end": "Period end",
+                "periodic_form": "Anchor form",
+                "periodic_filing_date": "Filed",
+                "metadata_source": "Normalization source",
+                "periodic_url": "SEC anchor filing",
+            }
+        )
+        display_dataframe(
+            anchor_view,
+            column_config={
+                "SEC anchor filing": st.column_config.LinkColumn("SEC anchor filing", display_text="Open filing")
+            },
+        )
+        st.caption("No metric values are taken from these 10-Q/10-K filings; they are used only for fiscal-period normalization and event matching.")
+
+
+analysis = st.session_state.analysis
+if not analysis:
+    st.info("Choose up to two fiscal years in the sidebar and run the 8-K reconciliation analysis.")
+    st.stop()
+
+coverage = analysis.get("coverage", pd.DataFrame())
+reconciliations = analysis.get("reconciliations", pd.DataFrame())
+adjustments = analysis.get("adjustments", pd.DataFrame())
+mentions = analysis.get("mentions", pd.DataFrame())
+sources = analysis.get("sources", pd.DataFrame())
+evidence = analysis.get("evidence", pd.DataFrame())
+warnings = analysis.get("warnings", pd.DataFrame())
+trends = add_change_columns(reconciliations)
+matrix = ng.make_metric_matrix(reconciliations, include_gaap=False)
+additional = (
+    mentions[mentions["status"].eq("Additional non-GAAP measure")].copy()
+    if not mentions.empty and "status" in mentions.columns
+    else pd.DataFrame()
+)
+
+st.divider()
+st.subheader("Analysis summary")
+periods_analyzed = len(coverage)
+periods_complete = int(coverage["status"].eq("Reconciliation metrics extracted").sum()) if not coverage.empty else 0
+unique_metrics = int(reconciliations["metric"].nunique()) if not reconciliations.empty else 0
+presentation_docs = (
+    int(sources[sources["document_role"].eq("Investor presentation")]["document_url"].nunique())
+    if not sources.empty and {"document_role", "document_url"}.issubset(sources.columns)
+    else 0
+)
+summary_columns = st.columns(4)
+with summary_columns[0]:
+    render_info_card("Fiscal periods", periods_analyzed, f"{periods_complete} with parsed reconciliations")
+with summary_columns[1]:
+    render_info_card("Structured metrics", len(reconciliations), f"{unique_metrics} unique metric names")
+with summary_columns[2]:
+    render_info_card("Adjustment rows", len(adjustments), "Line items between GAAP and non-GAAP")
+with summary_columns[3]:
+    render_info_card("Investor presentations checked", presentation_docs, f"{len(additional)} additional measure callouts")
+
+if reconciliations.empty:
+    st.warning(
+        "The matched 8-K exhibits were checked, but no GAAP-to-non-GAAP table was parsed into structured values. "
+        "Review the Source audit tab for the selected 8-K, PDFs, parsing warnings, and direct SEC links."
+    )
+else:
+    st.markdown(
+        '<div class="success-note"><strong>The metrics are in the Quarterly metrics and Reconciliation detail tabs below.</strong> '
+        'Each row includes the GAAP value, total adjustments, non-GAAP value, fiscal period, source type, and direct SEC link.</div>',
+        unsafe_allow_html=True,
+    )
+
+export_payload = dict(analysis)
+export_payload["metric_matrix"] = matrix
+export_payload["trend_analysis"] = trends
+excel_bytes = build_excel_export(company, st.session_state.analysis_years, analysis, matrix, trends)
+csv_zip_bytes = ng.build_export_zip(export_payload)
+
+download_columns = st.columns([1, 1, 2])
+with download_columns[0]:
+    st.download_button(
+        "Download formatted Excel",
+        data=excel_bytes,
+        file_name=f"{clean_text(company.get('ticker')) or company.get('cik')}_non_gaap_8k_analysis.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+with download_columns[1]:
+    st.download_button(
+        "Download CSV package",
+        data=csv_zip_bytes,
+        file_name=f"{clean_text(company.get('ticker')) or company.get('cik')}_non_gaap_8k_csv.zip",
+        mime="application/zip",
+        use_container_width=True,
+    )
+with download_columns[2]:
+    st.caption("Exports preserve fiscal-period labels, source URLs, parsing evidence, and warnings for review.")
+
+
+tab_metrics, tab_details, tab_adjustments, tab_additional, tab_sources = st.tabs(
+    [
+        "Quarterly metrics",
+        "Reconciliation detail",
+        "Adjustments",
+        "Additional measures",
+        "Source audit",
+    ]
+)
+
+with tab_metrics:
+    st.subheader("Two-year fiscal-quarter metric matrix")
+    include_gaap = st.toggle("Show the comparable GAAP value inside each matrix cell", value=False)
+    metric_matrix = ng.make_metric_matrix(reconciliations, include_gaap=include_gaap)
+    if metric_matrix.empty:
+        st.info("No structured reconciliation metrics were extracted.")
+    else:
+        display_dataframe(metric_matrix, height=min(760, 120 + 35 * len(metric_matrix)))
+        st.caption("A blank cell means the measure was not extracted for that fiscal quarter. Values are presented in the issuer's reported units.")
+
+        st.subheader("Quarterly movement")
+        detail_view = compact_reconciliation_view(trends)
+        display_dataframe(
+            detail_view,
+            column_config={
+                "SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")
+            },
+            height=min(720, 140 + 35 * len(detail_view)),
+        )
+        st.caption("For rates, changes are shown in percentage points or basis points. For other measures, changes are percentage changes when a comparable prior value exists.")
+
+        metric_options = sorted(trends["metric"].dropna().astype(str).unique().tolist())
+        if metric_options:
+            st.subheader("Metric trend")
+            selected_metric = st.selectbox("Select a metric", options=metric_options, key="metric_trend_selector")
+            trend_chart, chart_unit = chart_frame(trends, selected_metric)
+            if not trend_chart.empty:
+                st.line_chart(trend_chart, use_container_width=True)
+                st.caption(f"Chart unit: {chart_unit}. The chart follows issuer fiscal-quarter order, not calendar-quarter order.")
+
+with tab_details:
+    st.subheader("GAAP-to-non-GAAP reconciliation detail")
+    if reconciliations.empty:
+        st.info("No structured reconciliation rows were extracted.")
+    else:
+        period_options = sorted(reconciliations["period"].dropna().astype(str).unique().tolist(), key=period_sort_key, reverse=True)
+        selected_period = st.selectbox("Fiscal period", options=period_options, key="detail_period_selector")
+        period_rows = reconciliations[reconciliations["period"].eq(selected_period)].copy()
+        metric_options = ["All metrics"] + sorted(period_rows["metric"].dropna().astype(str).unique().tolist())
+        selected_detail_metric = st.selectbox("Metric", options=metric_options, key="detail_metric_selector")
+        if selected_detail_metric != "All metrics":
+            period_rows = period_rows[period_rows["metric"].eq(selected_detail_metric)]
+
+        for _, row in period_rows.sort_values(["metric", "source_role"]).iterrows():
+            title = f"{row.get('metric', '')} | {row.get('non_gaap_display', '')}"
+            with st.expander(title, expanded=selected_detail_metric != "All metrics"):
+                card_columns = st.columns(3)
+                with card_columns[0]:
+                    render_recon_card("Comparable GAAP", row.get("gaap_display", ""), row.get("gaap_label", ""))
+                with card_columns[1]:
+                    render_recon_card("Total adjustments", row.get("adjustment_display", ""), "Non-GAAP minus GAAP")
+                with card_columns[2]:
+                    render_recon_card("Reported non-GAAP", row.get("non_gaap_display", ""), row.get("non_gaap_label", ""))
+
+                pair_id = row.get("pair_id")
+                pair_adjustments = adjustments[adjustments["pair_id"].eq(pair_id)].copy() if not adjustments.empty else pd.DataFrame()
+                if not pair_adjustments.empty:
+                    st.markdown("**Adjustment bridge**")
+                    bridge = pair_adjustments[["adjustment_label", "adjustment_display"]].rename(
+                        columns={"adjustment_label": "Adjustment", "adjustment_display": "Reported value"}
+                    )
+                    display_dataframe(bridge)
+                else:
+                    st.caption("No individual adjustment lines were parsed between the GAAP and non-GAAP rows.")
+
+                source_page = row.get("source_page")
+                page_note = f" | PDF page {int(source_page)}" if pd.notna(source_page) else ""
+                st.caption(
+                    f"{row.get('source_role', '')}{page_note} | Parse confidence: {row.get('confidence', '')} | {row.get('table_title', '')}"
+                )
+                source_url = clean_text(row.get("source_url"))
+                if source_url:
+                    st.markdown(f"[Open the SEC source exhibit]({source_url})")
+
+        st.divider()
+        st.subheader("Reconciliation evidence")
+        if evidence.empty:
+            st.info("No table-level evidence records were created.")
+        else:
+            evidence_period = evidence[evidence["period"].eq(selected_period)].copy()
+            for _, row in evidence_period.iterrows():
+                page = row.get("source_page")
+                page_label = f" | page {int(page)}" if pd.notna(page) else ""
+                heading = f"{row.get('source_role', '')} | {row.get('table_title', '')}{page_label}"
+                with st.expander(heading):
+                    st.write(row.get("text_preview", ""))
+                    st.caption(
+                        f"Parsed rows: {row.get('parsed_rows', 0)} | Parsed metric pairs: {row.get('parsed_pairs', 0)} | Detection score: {row.get('reconciliation_score', '')}"
+                    )
+                    if clean_text(row.get("source_url")):
+                        st.markdown(f"[Open source]({row.get('source_url')})")
+
+with tab_adjustments:
+    st.subheader("Adjustment line items")
+    st.write(
+        "These are the issuer-reported reconciling items found between the comparable GAAP row and the non-GAAP row, such as stock-based compensation, restructuring, amortization, tax effects, or capital expenditures."
+    )
+    if adjustments.empty:
+        st.info("No structured adjustment rows were extracted.")
+    else:
+        adjustment_periods = sorted(adjustments["period"].dropna().astype(str).unique().tolist(), key=period_sort_key, reverse=True)
+        adjustment_period = st.selectbox("Fiscal period", options=["All periods"] + adjustment_periods, key="adjustment_period_selector")
+        adjustment_view = adjustments.copy()
+        if adjustment_period != "All periods":
+            adjustment_view = adjustment_view[adjustment_view["period"].eq(adjustment_period)]
+        columns = [
+            "period",
+            "metric",
+            "adjustment_label",
+            "adjustment_display",
+            "source_role",
+            "source_page",
+            "source_url",
+        ]
+        columns = [column for column in columns if column in adjustment_view.columns]
+        adjustment_view = adjustment_view[columns].rename(
+            columns={
+                "period": "Fiscal period",
+                "metric": "Non-GAAP metric",
+                "adjustment_label": "Adjustment",
+                "adjustment_display": "Reported value",
+                "source_role": "Source type",
+                "source_page": "PDF page",
+                "source_url": "SEC source",
+            }
+        )
+        display_dataframe(
+            adjustment_view,
+            column_config={
+                "SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")
+            },
+            height=min(760, 140 + 34 * len(adjustment_view)),
+        )
+
+with tab_additional:
+    st.subheader("Other non-GAAP measures discussed in the matched 8-K exhibits")
+    st.write(
+        "This section calls out measures mentioned in the earnings release, financial supplement, or investor presentation that were not matched to a structured GAAP-to-non-GAAP pair anywhere in the selected earnings 8-K exhibits."
+    )
+    if additional.empty:
+        st.info("No additional non-GAAP measures were identified beyond the structured reconciliation metrics.")
+    else:
+        callout_view = additional.copy()
+        callout_view["Where found"] = callout_view.apply(
+            lambda row: "Document containing a reconciliation"
+            if bool(row.get("source_has_reconciliation"))
+            else ("Investor presentation" if row.get("source_role") == "Investor presentation" else "Other matched EX-99 exhibit"),
+            axis=1,
+        )
+        columns = [
+            "period",
+            "metric",
+            "primary_value",
+            "Where found",
+            "source_role",
+            "source_content_type",
+            "source_page",
+            "source_url",
+        ]
+        columns = [column for column in columns if column in callout_view.columns]
+        table = callout_view[columns].rename(
+            columns={
+                "period": "Fiscal period",
+                "metric": "Additional measure",
+                "primary_value": "Nearby reported value",
+                "source_role": "Source type",
+                "source_content_type": "Format",
+                "source_page": "PDF page",
+                "source_url": "SEC source",
+            }
+        )
+        display_dataframe(
+            table,
+            column_config={
+                "SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")
+            },
+            height=min(650, 140 + 35 * len(table)),
+        )
+
+        st.subheader("Source context")
+        for _, row in callout_view.sort_values(["period", "metric"], ascending=[False, True]).iterrows():
+            value_label = f" | {row.get('primary_value')}" if clean_text(row.get("primary_value")) else ""
+            with st.expander(f"{row.get('period', '')} | {row.get('metric', '')}{value_label}"):
+                st.write(row.get("context", ""))
+                st.caption(
+                    f"Source: {row.get('source_role', '')} ({row.get('source_content_type', '')}) | Document: {row.get('source_document', '')}"
+                )
+                if clean_text(row.get("source_url")):
+                    st.markdown(f"[Open source]({row.get('source_url')})")
+
+with tab_sources:
+    st.subheader("Fiscal-quarter and 8-K coverage")
+    coverage_table = coverage_view(coverage)
+    display_dataframe(
+        coverage_table,
+        column_config={
+            "Earnings 8-K": st.column_config.LinkColumn("Earnings 8-K", display_text="Open 8-K"),
+            "Anchor 10-Q/10-K": st.column_config.LinkColumn("Anchor 10-Q/10-K", display_text="Open anchor"),
+        },
+        height=min(620, 150 + 38 * len(coverage_table)) if not coverage_table.empty else None,
+    )
+    st.caption(
+        "The anchor filing determines the issuer fiscal period. The matched Item 2.02 earnings 8-K and its EX-99 exhibits are the only metric sources."
+    )
+
+    st.subheader("Documents checked")
+    source_table = source_audit_view(sources)
+    display_dataframe(
+        source_table,
+        column_config={
+            "Exhibit source": st.column_config.LinkColumn("Exhibit source", display_text="Open exhibit"),
+            "8-K filing index": st.column_config.LinkColumn("8-K filing index", display_text="Open filing index"),
+        },
+        height=min(650, 150 + 36 * len(source_table)) if not source_table.empty else None,
+    )
+
+    st.subheader("Parsing warnings")
+    if warnings.empty:
+        st.success("No parsing warnings were recorded.")
+    else:
+        warning_view = warnings.copy()
+        if "source_url" in warning_view.columns:
+            display_dataframe(
+                warning_view,
+                column_config={
+                    "source_url": st.column_config.LinkColumn("Source", display_text="Open source")
+                },
+            )
+        else:
+            display_dataframe(warning_view)
+        st.caption("Image-only PDFs are flagged because this version does not perform OCR. Review the linked presentation manually when that warning appears.")
+
+    with st.expander("Methodology and limitations", expanded=False):
+        st.markdown(
+            """
+            **Matching logic**
+
+            1. Read recent 10-Q and 10-K filings to obtain `DocumentFiscalYearFocus`, `DocumentFiscalPeriodFocus`, and period-end dates when available.
+            2. For each fiscal quarter, score nearby 8-K/8-K/A filings using Item 2.02, Item 9.01, timing, earnings language, period references, and the presence of press-release or presentation exhibits.
+            3. Inspect relevant EX-99 HTML, text, and PDF exhibits. Extract a structured pair only where a comparable GAAP row and a non-GAAP/adjusted row can be associated in a reconciliation section.
+            4. Record individual reconciling items between those rows and separately call out additional non-GAAP measures discussed in the matched exhibits.
+
+            **Review points**
+
+            - Issuer formats vary, so every result retains a direct SEC source link and parse-confidence label.
+            - The structured value is the first reported numeric column in the matched reconciliation section, which is normally the current fiscal quarter for an earnings release.
+            - PDF text extraction depends on an embedded text layer. Image-only slides are identified in the warning log and require manual review.
+            - Non-GAAP measures are not standardized across issuers; metric names and definitions should be compared with the source disclosure.
+            """
+        )
