@@ -26,7 +26,7 @@ SEC_COMPANY_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 SEC_SIC_LIST = "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
-APP_VERSION = "4.0.0"
+APP_VERSION = "5.0.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -899,6 +899,93 @@ ADJUSTMENT_TERMS = re.compile(
     re.I,
 )
 
+# Ordered from the most specific labels to broad catch-alls.  The issuer's exact
+# wording is always retained; this taxonomy is only a comparison aid.
+ADJUSTMENT_CATEGORY_PATTERNS: list[tuple[str, str]] = [
+    (
+        "Stock-based and equity compensation",
+        r"stock[- ]based|share[- ]based|equity[- ]based|incentive compensation.{0,40}(?:equity|shares?)|"
+        r"founder shares?|restricted stock|option expense",
+    ),
+    (
+        "Amortization of acquired intangibles",
+        r"amortization.{0,45}(?:acquired|acquisition[- ]related|purchase accounting|intangible)|"
+        r"(?:acquired|acquisition[- ]related).{0,45}amortization",
+    ),
+    (
+        "Acquisition and transaction costs",
+        r"acquisition[- ]related|business combination|transaction costs?|deal costs?|due diligence|"
+        r"contingent consideration|purchase accounting",
+    ),
+    (
+        "Separation and spin-off costs",
+        r"separation[- ]related|spin[- ]?off|stand[- ]alone company|disentanglement",
+    ),
+    (
+        "Restructuring and severance",
+        r"restructur|severance|termination benefits?|workforce reduction|facility closure|exit costs?",
+    ),
+    (
+        "Integration and transformation costs",
+        r"integration|transformation|business optimization|strategic initiatives?|systems? conversion",
+    ),
+    (
+        "Impairments and write-downs",
+        r"impairment|write[- ]?down|write[- ]?off|abandonment",
+    ),
+    (
+        "Litigation, legal, and regulatory",
+        r"litigation|legal (?:expense|cost|settlement|reserve)|regulatory|investigation|compliance matter",
+    ),
+    (
+        "Gains/losses on assets, investments, or divestitures",
+        r"(?:gain|loss).{0,55}(?:sale|disposition|divestiture|asset|investment|equity method)|"
+        r"(?:sale|disposition|divestiture).{0,55}(?:gain|loss)",
+    ),
+    (
+        "Fair-value and mark-to-market changes",
+        r"fair value|mark[- ]to[- ]market|remeasurement|valuation adjustment",
+    ),
+    (
+        "Debt, refinancing, and extinguishment",
+        r"debt extinguishment|loss on extinguishment|refinancing|financing costs?|debt issuance|"
+        r"convertible note|early repayment",
+    ),
+    (
+        "Income-tax effects and discrete tax items",
+        r"tax effect|income tax|tax adjustment|tax benefit|tax expense|effective tax rate|discrete tax",
+    ),
+    (
+        "Foreign-exchange effects",
+        r"foreign exchange|foreign currency|currency translation|fx impact|constant currency",
+    ),
+    (
+        "Pension and postretirement items",
+        r"pension|postretirement|actuarial|settlement accounting",
+    ),
+    (
+        "Depreciation and amortization",
+        r"depreciation|amortization",
+    ),
+    (
+        "Capital expenditures",
+        r"capital expenditures?|purchases? of (?:property|plant|equipment)|capex",
+    ),
+    (
+        "Insurance and settlement items",
+        r"insurance (?:recovery|proceeds|settlement)|settlement (?:gain|loss|cost)",
+    ),
+    (
+        "Non-cash and other accounting items",
+        r"non[- ]cash|accounting change|adoption of|inventory step[- ]?up|lifo|fifo",
+    ),
+]
+
+ADJUSTMENT_CATEGORY_ORDER = {
+    category: index for index, (category, _pattern) in enumerate(ADJUSTMENT_CATEGORY_PATTERNS, start=1)
+}
+ADJUSTMENT_CATEGORY_ORDER["Other issuer-specific adjustment"] = len(ADJUSTMENT_CATEGORY_ORDER) + 1
+
 NON_GAAP_START = re.compile(
     r"^(?:non[- ]gaap|adjusted|normalized|core|free cash flow|funds from operations|affo|ffo|"
     r"ebitda|ebit|ebitdare|ebitdax|distributable earnings|same[- ]store)",
@@ -907,7 +994,7 @@ NON_GAAP_START = re.compile(
 
 HEADER_LABEL = re.compile(
     rf"(?:months? ended|years? ended|quarter ended|unaudited|in thousands|in millions|in billions|"
-    rf"^{MONTH_PATTERN}\s+\d{{1,2}}|^q[1-4]\s+\d{{4}})",
+    rf"^(?:{MONTH_PATTERN})\s+\d{{1,2}}|^q[1-4]\s+\d{{4}})",
     re.I,
 )
 
@@ -1160,6 +1247,484 @@ def format_value(value: Optional[float], unit: str, scale: str = "units") -> str
     if abs(value - round(value)) < 1e-9:
         return f"{value:,.0f}"
     return f"{value:,.2f}"
+
+
+
+def normalize_adjustment_label(label: str) -> str:
+    """Normalize superficial footnote markers while preserving issuer wording."""
+    value = clean_space(label).replace("–", "-").replace("—", "-")
+    previous = None
+    while previous != value:
+        previous = value
+        value = re.sub(r"\s*(?:\(\s*[a-z0-9]{1,3}\s*\)|\[\s*[a-z0-9]{1,3}\s*\])\s*$", "", value, flags=re.I)
+    return clean_space(value)
+
+
+def classify_adjustment_label(label: str) -> str:
+    """Map an issuer label to a comparison category without replacing the raw label."""
+    value = normalize_adjustment_label(label)
+    for category, pattern in ADJUSTMENT_CATEGORY_PATTERNS:
+        if re.search(pattern, value, re.I):
+            return category
+    return "Other issuer-specific adjustment"
+
+
+def fiscal_period_rank(fiscal_year: Any, fiscal_quarter: Any) -> int:
+    try:
+        year = int(float(fiscal_year))
+    except Exception:
+        year = 0
+    quarter = QUARTER_ORDER.get(clean_space(fiscal_quarter).upper(), 0)
+    return year * 10 + quarter
+
+
+def ordered_fiscal_periods(frame: pd.DataFrame) -> list[str]:
+    if frame is None or frame.empty or "period" not in frame.columns:
+        return []
+    data = frame.copy()
+    if {"fiscal_year", "fiscal_quarter"}.issubset(data.columns):
+        data["_period_rank"] = data.apply(
+            lambda row: fiscal_period_rank(row.get("fiscal_year"), row.get("fiscal_quarter")), axis=1
+        )
+    else:
+        def _parse_period(value: Any) -> int:
+            match = re.search(r"FY(\d{4})\s+Q([1-4])", clean_space(value), re.I)
+            return int(match.group(1)) * 10 + int(match.group(2)) if match else 0
+        data["_period_rank"] = data["period"].map(_parse_period)
+    return (
+        data[["period", "_period_rank"]]
+        .dropna(subset=["period"])
+        .drop_duplicates()
+        .sort_values(["_period_rank", "period"])["period"]
+        .astype(str)
+        .tolist()
+    )
+
+
+def _normalized_adjustment_amount(row: pd.Series) -> Optional[float]:
+    try:
+        value = float(row.get("adjustment_value"))
+    except Exception:
+        return None
+    unit = clean_space(row.get("unit"))
+    scale = clean_space(row.get("scale"))
+    return normalize_value(value, scale, unit) if unit == "usd" else value
+
+
+def _format_normalized_amount(value: Optional[float], unit: str) -> str:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "—"
+    return format_value(float(value), unit, "units")
+
+
+def enrich_adjustments(
+    adjustments: pd.DataFrame,
+    reconciliations: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Add normalized categories, period history, and recurrence indicators.
+
+    The exact issuer label remains in ``adjustment_label``.  Categories and
+    recurrence fields are analytical aids, not conclusions about whether an
+    adjustment is permissible or truly non-recurring.
+    """
+    data = adjustments.copy() if isinstance(adjustments, pd.DataFrame) else pd.DataFrame()
+    added_columns = {
+        "normalized_adjustment_label": "object",
+        "adjustment_category": "object",
+        "adjustment_category_order": "int64",
+        "normalized_adjustment_value": "float64",
+        "absolute_adjustment_value": "float64",
+        "effect_on_non_gaap": "object",
+        "period_rank": "int64",
+        "observed_period_count": "int64",
+        "available_period_count": "int64",
+        "observed_frequency": "object",
+        "recurrence_indicator": "object",
+        "period_lifecycle": "object",
+        "first_observed_period": "object",
+        "last_observed_period": "object",
+    }
+    if data.empty:
+        for column, dtype in added_columns.items():
+            if column not in data.columns:
+                data[column] = pd.Series(dtype=dtype)
+        return data
+
+    for column in ["adjustment_label", "metric", "period", "fiscal_quarter", "unit", "scale"]:
+        if column not in data.columns:
+            data[column] = ""
+    if "fiscal_year" not in data.columns:
+        data["fiscal_year"] = 0
+
+    data["normalized_adjustment_label"] = data["adjustment_label"].map(normalize_adjustment_label)
+    data["adjustment_category"] = data["adjustment_label"].map(classify_adjustment_label)
+    data["adjustment_category_order"] = data["adjustment_category"].map(ADJUSTMENT_CATEGORY_ORDER).fillna(999).astype(int)
+    data["normalized_adjustment_value"] = data.apply(_normalized_adjustment_amount, axis=1)
+    data["absolute_adjustment_value"] = data["normalized_adjustment_value"].abs()
+    data["effect_on_non_gaap"] = data["normalized_adjustment_value"].map(
+        lambda value: "No numeric effect parsed"
+        if value is None or pd.isna(value) or float(value) == 0
+        else "Increases the reported non-GAAP measure"
+        if float(value) > 0
+        else "Decreases the reported non-GAAP measure"
+    )
+    data["period_rank"] = data.apply(
+        lambda row: fiscal_period_rank(row.get("fiscal_year"), row.get("fiscal_quarter")), axis=1
+    )
+
+    period_source = reconciliations if isinstance(reconciliations, pd.DataFrame) and not reconciliations.empty else data
+    metric_periods: dict[str, list[int]] = defaultdict(list)
+    metric_period_labels: dict[tuple[str, int], str] = {}
+    if isinstance(period_source, pd.DataFrame) and not period_source.empty:
+        source = period_source.copy()
+        for column in ["metric", "period", "fiscal_year", "fiscal_quarter"]:
+            if column not in source.columns:
+                source[column] = ""
+        source["_period_rank"] = source.apply(
+            lambda row: fiscal_period_rank(row.get("fiscal_year"), row.get("fiscal_quarter")), axis=1
+        )
+        for metric, group in source.groupby("metric", dropna=False):
+            metric_name = clean_space(metric)
+            ranks = sorted({int(value) for value in group["_period_rank"].dropna().tolist() if int(value) > 0})
+            metric_periods[metric_name] = ranks
+            for _, row in group.iterrows():
+                rank = int(row.get("_period_rank") or 0)
+                if rank > 0:
+                    metric_period_labels[(metric_name, rank)] = clean_space(row.get("period"))
+
+    for _, row in data.iterrows():
+        metric_name = clean_space(row.get("metric"))
+        rank = int(row.get("period_rank") or 0)
+        if rank > 0:
+            metric_period_labels[(metric_name, rank)] = clean_space(row.get("period"))
+            if rank not in metric_periods[metric_name]:
+                metric_periods[metric_name].append(rank)
+                metric_periods[metric_name] = sorted(set(metric_periods[metric_name]))
+
+    presence: dict[tuple[str, str], list[int]] = {}
+    for (metric, category), group in data.groupby(["metric", "adjustment_category"], dropna=False):
+        key = (clean_space(metric), clean_space(category))
+        presence[key] = sorted({int(value) for value in group["period_rank"].dropna().tolist() if int(value) > 0})
+
+    observed_counts: list[int] = []
+    available_counts: list[int] = []
+    frequencies: list[str] = []
+    recurrence: list[str] = []
+    lifecycle: list[str] = []
+    first_periods: list[str] = []
+    last_periods: list[str] = []
+
+    for _, row in data.iterrows():
+        metric_name = clean_space(row.get("metric"))
+        category = clean_space(row.get("adjustment_category"))
+        rank = int(row.get("period_rank") or 0)
+        observed = presence.get((metric_name, category), [])
+        available = metric_periods.get(metric_name, []) or observed
+        observed_count = len(observed)
+        available_count = len(available)
+        observed_counts.append(observed_count)
+        available_counts.append(available_count)
+        frequencies.append(f"{observed_count} of {available_count} analyzed periods" if available_count else "")
+        recurrence.append("Repeated in selected history" if observed_count >= 2 else "Single-period in selected history")
+
+        if not observed or rank <= 0:
+            lifecycle.append("")
+            first_periods.append("")
+            last_periods.append("")
+            continue
+        first_periods.append(metric_period_labels.get((metric_name, observed[0]), str(observed[0])))
+        last_periods.append(metric_period_labels.get((metric_name, observed[-1]), str(observed[-1])))
+        if rank == observed[0]:
+            lifecycle.append("First observed in selected history")
+        else:
+            try:
+                position = available.index(rank)
+            except ValueError:
+                position = -1
+            previous_available = available[position - 1] if position > 0 else None
+            lifecycle.append(
+                "Continued from prior analyzed period"
+                if previous_available in observed
+                else "Returned after a gap"
+            )
+
+    data["observed_period_count"] = observed_counts
+    data["available_period_count"] = available_counts
+    data["observed_frequency"] = frequencies
+    data["recurrence_indicator"] = recurrence
+    data["period_lifecycle"] = lifecycle
+    data["first_observed_period"] = first_periods
+    data["last_observed_period"] = last_periods
+
+    sort_columns = [column for column in ["fiscal_year", "period_rank", "metric", "adjustment_category_order", "adjustment_label"] if column in data.columns]
+    return data.sort_values(sort_columns).reset_index(drop=True)
+
+
+def _tie_out_tolerance(expected: float, unit: str) -> float:
+    if unit == "percent":
+        return 0.15
+    if unit == "bps":
+        return 1.0
+    if unit == "usd_per_share":
+        return 0.015
+    if unit == "usd":
+        return max(1.0, abs(expected) * 0.0025)
+    return max(0.01, abs(expected) * 0.005)
+
+
+def build_adjustment_tieouts(
+    reconciliations: pd.DataFrame,
+    adjustments: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compare parsed adjustment lines with non-GAAP minus GAAP for each bridge."""
+    columns = [
+        "pair_id", "fiscal_year", "fiscal_quarter", "period", "metric", "gaap_display",
+        "expected_adjustment_display", "parsed_adjustment_display", "variance_display",
+        "non_gaap_display", "detail_line_count", "category_count", "tie_out_status",
+        "tie_out_note", "source_role", "source_page", "source_url",
+    ]
+    if reconciliations is None or reconciliations.empty:
+        return pd.DataFrame(columns=columns)
+
+    detail = adjustments.copy() if isinstance(adjustments, pd.DataFrame) else pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for _, pair in reconciliations.iterrows():
+        pair_id = clean_space(pair.get("pair_id"))
+        pair_detail = detail[detail.get("pair_id", pd.Series(index=detail.index, dtype=str)).astype(str).eq(pair_id)].copy() if not detail.empty else pd.DataFrame()
+        if not pair_detail.empty:
+            pair_detail = pair_detail.drop_duplicates(
+                [column for column in ["pair_id", "adjustment_label", "adjustment_value", "unit", "scale", "source_url", "source_page"] if column in pair_detail.columns],
+                keep="first",
+            )
+        numeric = pd.to_numeric(pair_detail.get("adjustment_value", pd.Series(dtype=float)), errors="coerce").dropna()
+        parsed_sum = float(numeric.sum()) if not numeric.empty else None
+        try:
+            expected = float(pair.get("adjustment_value"))
+        except Exception:
+            expected = None
+        unit = clean_space(pair.get("unit"))
+        scale = clean_space(pair.get("scale")) or "units"
+        variance = parsed_sum - expected if parsed_sum is not None and expected is not None else None
+        if pair_detail.empty:
+            status = "No line-item detail"
+            note = "The GAAP and non-GAAP endpoints were parsed, but individual reconciling rows were not."
+        elif expected is None:
+            status = "No total available"
+            note = "Individual rows were parsed, but the endpoint difference was unavailable."
+        elif variance is not None and abs(variance) <= _tie_out_tolerance(expected, unit):
+            status = "Ties within rounding"
+            note = "The parsed line items agree with non-GAAP minus GAAP within the rounding threshold."
+        else:
+            status = "Review difference"
+            note = "Parsed line items do not fully agree with the endpoint difference; review for subtotals, omitted rows, or table parsing issues."
+        categories = (
+            pair_detail["adjustment_category"].nunique()
+            if not pair_detail.empty and "adjustment_category" in pair_detail.columns
+            else pair_detail.get("adjustment_label", pd.Series(dtype=str)).map(classify_adjustment_label).nunique()
+            if not pair_detail.empty
+            else 0
+        )
+        rows.append(
+            {
+                "pair_id": pair_id,
+                "fiscal_year": pair.get("fiscal_year"),
+                "fiscal_quarter": pair.get("fiscal_quarter"),
+                "period": pair.get("period"),
+                "metric": pair.get("metric"),
+                "gaap_display": pair.get("gaap_display"),
+                "expected_adjustment_display": pair.get("adjustment_display"),
+                "parsed_adjustment_display": format_value(parsed_sum, unit, scale) if parsed_sum is not None else "—",
+                "variance_display": format_value(variance, unit, scale) if variance is not None else "—",
+                "non_gaap_display": pair.get("non_gaap_display"),
+                "detail_line_count": int(len(pair_detail)),
+                "category_count": int(categories),
+                "tie_out_status": status,
+                "tie_out_note": note,
+                "source_role": pair.get("source_role"),
+                "source_page": pair.get("source_page"),
+                "source_url": pair.get("source_url"),
+            }
+        )
+    result = pd.DataFrame(rows, columns=columns)
+    if not result.empty:
+        result["_rank"] = result.apply(
+            lambda row: fiscal_period_rank(row.get("fiscal_year"), row.get("fiscal_quarter")), axis=1
+        )
+        result = result.sort_values(["_rank", "metric"]).drop(columns=["_rank"]).reset_index(drop=True)
+    return result
+
+
+def _aggregate_adjustment_values(group: pd.DataFrame) -> tuple[str, dict[str, float]]:
+    displays: list[str] = []
+    numeric_by_unit: dict[str, float] = {}
+    for unit, unit_group in group.groupby("unit", dropna=False):
+        unit_name = clean_space(unit) or "number"
+        if unit_name == "usd":
+            values = pd.to_numeric(unit_group.get("normalized_adjustment_value"), errors="coerce").dropna()
+        else:
+            values = pd.to_numeric(unit_group.get("adjustment_value"), errors="coerce").dropna()
+        if values.empty:
+            continue
+        total = float(values.sum())
+        numeric_by_unit[unit_name] = total
+        displays.append(_format_normalized_amount(total, unit_name))
+    return " / ".join(displays) if displays else "—", numeric_by_unit
+
+
+def make_adjustment_value_matrix(adjustment_history: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Create an adjustment-category-by-period matrix for one non-GAAP metric."""
+    if adjustment_history is None or adjustment_history.empty or not clean_space(metric):
+        return pd.DataFrame()
+    data = adjustment_history[adjustment_history["metric"].astype(str).eq(str(metric))].copy()
+    if data.empty:
+        return pd.DataFrame()
+    records: list[dict[str, Any]] = []
+    for (category, period), group in data.groupby(["adjustment_category", "period"], dropna=False):
+        display, _numeric = _aggregate_adjustment_values(group)
+        records.append(
+            {
+                "adjustment_category": category,
+                "period": period,
+                "matrix_value": display,
+                "category_order": int(group["adjustment_category_order"].min()) if "adjustment_category_order" in group else 999,
+            }
+        )
+    values = pd.DataFrame(records)
+    matrix = values.pivot_table(index="adjustment_category", columns="period", values="matrix_value", aggfunc="first")
+    ordered_periods = ordered_fiscal_periods(data)
+    category_order = (
+        values[["adjustment_category", "category_order"]]
+        .drop_duplicates()
+        .sort_values(["category_order", "adjustment_category"])["adjustment_category"]
+        .tolist()
+    )
+    matrix = matrix.reindex(index=category_order, columns=ordered_periods).reset_index()
+    return matrix.rename(columns={"adjustment_category": "Adjustment category"})
+
+
+def make_adjustment_presence_matrix(adjustment_history: pd.DataFrame) -> pd.DataFrame:
+    """Show where each category appears without summing the same item across metrics."""
+    if adjustment_history is None or adjustment_history.empty:
+        return pd.DataFrame()
+    data = adjustment_history.copy()
+    records: list[dict[str, Any]] = []
+    for (category, period), group in data.groupby(["adjustment_category", "period"], dropna=False):
+        metric_count = int(group["metric"].nunique())
+        line_count = int(len(group))
+        metric_word = "metric" if metric_count == 1 else "metrics"
+        line_word = "line" if line_count == 1 else "lines"
+        records.append(
+            {
+                "adjustment_category": category,
+                "period": period,
+                "matrix_value": f"{metric_count} {metric_word} · {line_count} {line_word}",
+                "category_order": int(group["adjustment_category_order"].min()) if "adjustment_category_order" in group else 999,
+            }
+        )
+    values = pd.DataFrame(records)
+    matrix = values.pivot_table(index="adjustment_category", columns="period", values="matrix_value", aggfunc="first")
+    ordered_periods = ordered_fiscal_periods(data)
+    category_order = (
+        values[["adjustment_category", "category_order"]]
+        .drop_duplicates()
+        .sort_values(["category_order", "adjustment_category"])["adjustment_category"]
+        .tolist()
+    )
+    matrix = matrix.reindex(index=category_order, columns=ordered_periods).reset_index()
+    return matrix.rename(columns={"adjustment_category": "Adjustment category"})
+
+
+def make_adjustment_metric_matrix(adjustment_history: pd.DataFrame) -> pd.DataFrame:
+    """Create an export-friendly matrix keyed by metric and adjustment category."""
+    if adjustment_history is None or adjustment_history.empty:
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    for metric in sorted(adjustment_history["metric"].dropna().astype(str).unique().tolist()):
+        matrix = make_adjustment_value_matrix(adjustment_history, metric)
+        if matrix.empty:
+            continue
+        matrix.insert(0, "Non-GAAP metric", metric)
+        frames.append(matrix)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def adjustment_category_summary(adjustment_history: pd.DataFrame) -> pd.DataFrame:
+    if adjustment_history is None or adjustment_history.empty:
+        return pd.DataFrame()
+    records: list[dict[str, Any]] = []
+    for category, group in adjustment_history.groupby("adjustment_category", dropna=False):
+        periods = ordered_fiscal_periods(group)
+        labels = sorted({clean_space(value) for value in group["adjustment_label"].tolist() if clean_space(value)})
+        records.append(
+            {
+                "adjustment_category": category,
+                "periods_observed": len(periods),
+                "first_period": periods[0] if periods else "",
+                "latest_period": periods[-1] if periods else "",
+                "metrics_affected": int(group["metric"].nunique()),
+                "issuer_labels": "; ".join(labels),
+                "recurrence_indicator": "Repeated in selected history" if len(periods) >= 2 else "Single-period in selected history",
+                "category_order": int(group["adjustment_category_order"].min()) if "adjustment_category_order" in group else 999,
+            }
+        )
+    result = pd.DataFrame(records).sort_values(["category_order", "adjustment_category"]).drop(columns=["category_order"])
+    return result.reset_index(drop=True)
+
+
+def compare_adjustment_periods(
+    adjustment_history: pd.DataFrame,
+    metric: str,
+    current_period: str,
+    prior_period: str,
+) -> pd.DataFrame:
+    """Compare adjustment categories for one metric across two selected fiscal periods."""
+    columns = [
+        "status", "adjustment_category", "prior_value", "current_value", "change",
+        "prior_issuer_labels", "current_issuer_labels", "observed_periods", "source_url",
+    ]
+    if adjustment_history is None or adjustment_history.empty or not metric or not current_period or not prior_period:
+        return pd.DataFrame(columns=columns)
+    data = adjustment_history[adjustment_history["metric"].astype(str).eq(str(metric))].copy()
+    current = data[data["period"].astype(str).eq(str(current_period))]
+    prior = data[data["period"].astype(str).eq(str(prior_period))]
+    categories = sorted(set(current["adjustment_category"].tolist()) | set(prior["adjustment_category"].tolist()), key=lambda value: (ADJUSTMENT_CATEGORY_ORDER.get(value, 999), value))
+    rows: list[dict[str, Any]] = []
+    for category in categories:
+        current_group = current[current["adjustment_category"].eq(category)]
+        prior_group = prior[prior["adjustment_category"].eq(category)]
+        if not current_group.empty and prior_group.empty:
+            status = "New in current period"
+        elif not current_group.empty and not prior_group.empty:
+            status = "Continued"
+        else:
+            status = "No longer reported"
+        current_display, current_numeric = _aggregate_adjustment_values(current_group) if not current_group.empty else ("—", {})
+        prior_display, prior_numeric = _aggregate_adjustment_values(prior_group) if not prior_group.empty else ("—", {})
+        change_display = ""
+        common_units = set(current_numeric) & set(prior_numeric)
+        if len(common_units) == 1:
+            unit = next(iter(common_units))
+            change_display = _format_normalized_amount(current_numeric[unit] - prior_numeric[unit], unit)
+        rows.append(
+            {
+                "status": status,
+                "adjustment_category": category,
+                "prior_value": prior_display,
+                "current_value": current_display,
+                "change": change_display,
+                "prior_issuer_labels": "; ".join(sorted(set(prior_group.get("adjustment_label", pd.Series(dtype=str)).astype(str).tolist()))),
+                "current_issuer_labels": "; ".join(sorted(set(current_group.get("adjustment_label", pd.Series(dtype=str)).astype(str).tolist()))),
+                "observed_periods": int(data[data["adjustment_category"].eq(category)]["period"].nunique()),
+                "source_url": clean_space(current_group.iloc[0].get("source_url")) if not current_group.empty else clean_space(prior_group.iloc[0].get("source_url")) if not prior_group.empty else "",
+            }
+        )
+    order = {"New in current period": 0, "Continued": 1, "No longer reported": 2}
+    result = pd.DataFrame(rows, columns=columns)
+    if not result.empty:
+        result["_status_order"] = result["status"].map(order).fillna(9)
+        result["_category_order"] = result["adjustment_category"].map(ADJUSTMENT_CATEGORY_ORDER).fillna(999)
+        result = result.sort_values(["_status_order", "_category_order", "adjustment_category"]).drop(columns=["_status_order", "_category_order"])
+    return result.reset_index(drop=True)
 
 
 def _find_gaap_match(rows: list[dict[str, Any]], non_gaap_index: int) -> Optional[int]:
@@ -2007,15 +2572,48 @@ def analyze_company_quarters(
             ["fiscal_year", "fiscal_quarter", "metric", "non_gaap_value", "unit"], keep="first"
         ).drop(columns=["role_rank"])
 
+    if not adjustments_df.empty:
+        if not reconciliations_df.empty and "pair_id" in reconciliations_df.columns:
+            valid_pair_ids = set(reconciliations_df["pair_id"].dropna().astype(str).tolist())
+            adjustments_df = adjustments_df[adjustments_df["pair_id"].astype(str).isin(valid_pair_ids)].copy()
+        duplicate_columns = [
+            column
+            for column in [
+                "fiscal_year",
+                "fiscal_quarter",
+                "pair_id",
+                "adjustment_label",
+                "adjustment_value",
+                "unit",
+                "scale",
+                "source_url",
+                "source_page",
+            ]
+            if column in adjustments_df.columns
+        ]
+        if duplicate_columns:
+            adjustments_df = adjustments_df.drop_duplicates(duplicate_columns, keep="first")
+        adjustments_df["_period_rank"] = adjustments_df.apply(
+            lambda row: fiscal_period_rank(row.get("fiscal_year"), row.get("fiscal_quarter")), axis=1
+        )
+        adjustments_df = adjustments_df.sort_values(
+            ["_period_rank", "metric", "adjustment_label"]
+        ).drop(columns=["_period_rank"]).reset_index(drop=True)
+
     if not mentions_df.empty:
         mentions_df = mentions_df.drop_duplicates(
             ["fiscal_year", "fiscal_quarter", "metric", "source_url", "source_page"], keep="first"
         )
 
+    adjustment_history_df = enrich_adjustments(adjustments_df, reconciliations_df)
+    adjustment_tieouts_df = build_adjustment_tieouts(reconciliations_df, adjustment_history_df)
+
     return {
         "coverage": coverage_df,
         "reconciliations": reconciliations_df,
         "adjustments": adjustments_df,
+        "adjustment_history": adjustment_history_df,
+        "adjustment_tieouts": adjustment_tieouts_df,
         "mentions": mentions_df,
         "sources": sources_df,
         "evidence": evidence_df,
@@ -2224,8 +2822,22 @@ def build_excel_report(company: dict[str, Any], analysis: dict[str, pd.DataFrame
     if not additional_measures.empty and "status" in additional_measures:
         additional_measures = additional_measures[additional_measures["status"] == "Additional non-GAAP measure"]
 
+    raw_adjustments = analysis.get("adjustments", pd.DataFrame())
+    adjustment_history = analysis.get("adjustment_history", pd.DataFrame())
+    if adjustment_history.empty and not raw_adjustments.empty:
+        adjustment_history = enrich_adjustments(raw_adjustments, reconciliations)
+    adjustment_tieouts = analysis.get("adjustment_tieouts", pd.DataFrame())
+    if adjustment_tieouts.empty and not reconciliations.empty:
+        adjustment_tieouts = build_adjustment_tieouts(reconciliations, adjustment_history)
+    adjustment_matrix = make_adjustment_metric_matrix(adjustment_history)
+    adjustment_summary = adjustment_category_summary(adjustment_history)
+
     write_frame("Metrics", reconciliations, "Reconciled non-GAAP metrics extracted from earnings 8-K exhibits")
-    write_frame("Adjustments", analysis.get("adjustments", pd.DataFrame()), "GAAP-to-non-GAAP adjustment bridge")
+    write_frame("Adjustment History", adjustment_history, "Issuer adjustment lines normalized by category and fiscal period")
+    write_frame("Adjustment Matrix", adjustment_matrix, "Adjustment categories by non-GAAP metric and fiscal period")
+    write_frame("Adjustment Summary", adjustment_summary, "Observed adjustment categories and recurrence across selected periods")
+    write_frame("Adjustment Tie-Outs", adjustment_tieouts, "Parsed adjustment lines compared with non-GAAP minus GAAP")
+    write_frame("Raw Adjustments", raw_adjustments, "Raw GAAP-to-non-GAAP adjustment bridge rows")
     write_frame("Other Measures", additional_measures, "Other non-GAAP measures discussed in matched 8-K exhibits")
     write_frame("Quarter Coverage", coverage, "Periodic filings paired to earnings 8-K filings")
     write_frame("Source Documents", sources, "EX-99 source documents scanned")

@@ -392,6 +392,16 @@ def build_excel_export(
     additional = analysis.get("mentions", pd.DataFrame())
     if not additional.empty and "status" in additional.columns:
         additional = additional[additional["status"].eq("Additional non-GAAP measure")].copy()
+    raw_adjustments = analysis.get("adjustments", pd.DataFrame())
+    reconciliations = analysis.get("reconciliations", pd.DataFrame())
+    adjustment_history = analysis.get("adjustment_history", pd.DataFrame())
+    if adjustment_history.empty and not raw_adjustments.empty:
+        adjustment_history = ng.enrich_adjustments(raw_adjustments, reconciliations)
+    adjustment_tieouts = analysis.get("adjustment_tieouts", pd.DataFrame())
+    if adjustment_tieouts.empty and not reconciliations.empty:
+        adjustment_tieouts = ng.build_adjustment_tieouts(reconciliations, adjustment_history)
+    adjustment_matrix = ng.make_adjustment_metric_matrix(adjustment_history)
+    adjustment_summary = ng.adjustment_category_summary(adjustment_history)
 
     summary = pd.DataFrame(
         {
@@ -426,8 +436,12 @@ def build_excel_export(
         ("Summary", summary),
         ("Metric matrix", matrix),
         ("Trend analysis", trends),
-        ("Reconciliations", analysis.get("reconciliations", pd.DataFrame())),
-        ("Adjustments", analysis.get("adjustments", pd.DataFrame())),
+        ("Reconciliations", reconciliations),
+        ("Adjustment history", adjustment_history),
+        ("Adjustment matrix", adjustment_matrix),
+        ("Adjustment summary", adjustment_summary),
+        ("Adjustment tie-outs", adjustment_tieouts),
+        ("Raw adjustments", raw_adjustments),
         ("Additional measures", additional),
         ("Coverage", analysis.get("coverage", pd.DataFrame())),
         ("Source audit", analysis.get("sources", pd.DataFrame())),
@@ -479,6 +493,123 @@ def compact_reconciliation_view(trends: pd.DataFrame) -> pd.DataFrame:
             "yoy_change": "YoY change",
             "source_role": "Source type",
             "confidence": "Parse confidence",
+            "source_url": "SEC source",
+        }
+    )
+
+
+
+def adjustment_chart_frame(adjustment_history: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str]:
+    if adjustment_history.empty:
+        return pd.DataFrame(), ""
+    data = adjustment_history[adjustment_history["metric"].astype(str).eq(str(metric))].copy()
+    if data.empty:
+        return pd.DataFrame(), ""
+    unit = clean_text(data["unit"].mode().iloc[0]) if "unit" in data.columns and not data["unit"].mode().empty else "number"
+    data = data[data["unit"].astype(str).eq(unit)].copy()
+    if unit == "usd":
+        data["chart_value"] = pd.to_numeric(data["normalized_adjustment_value"], errors="coerce") / 1_000_000.0
+        unit_label = "USD millions"
+    elif unit == "percent":
+        data["chart_value"] = pd.to_numeric(data["adjustment_value"], errors="coerce")
+        unit_label = "Percentage points"
+    elif unit == "usd_per_share":
+        data["chart_value"] = pd.to_numeric(data["adjustment_value"], errors="coerce")
+        unit_label = "USD per share"
+    elif unit == "bps":
+        data["chart_value"] = pd.to_numeric(data["adjustment_value"], errors="coerce")
+        unit_label = "Basis points"
+    else:
+        data["chart_value"] = pd.to_numeric(data["adjustment_value"], errors="coerce")
+        unit_label = "Reported value"
+    data = data.dropna(subset=["chart_value"])
+    if data.empty:
+        return pd.DataFrame(), unit_label
+    top_categories = (
+        data.groupby("adjustment_category")["chart_value"]
+        .apply(lambda values: values.abs().sum())
+        .sort_values(ascending=False)
+        .head(8)
+        .index
+        .tolist()
+    )
+    data = data[data["adjustment_category"].isin(top_categories)]
+    chart = data.pivot_table(
+        index="period",
+        columns="adjustment_category",
+        values="chart_value",
+        aggfunc="sum",
+        fill_value=0,
+    )
+    ordered = [period for period in ng.ordered_fiscal_periods(data) if period in chart.index]
+    return chart.reindex(ordered), unit_label
+
+
+def compact_adjustment_history_view(adjustment_history: pd.DataFrame) -> pd.DataFrame:
+    if adjustment_history.empty:
+        return pd.DataFrame()
+    columns = [
+        "period",
+        "metric",
+        "adjustment_category",
+        "adjustment_label",
+        "adjustment_display",
+        "effect_on_non_gaap",
+        "observed_frequency",
+        "period_lifecycle",
+        "source_role",
+        "source_page",
+        "source_url",
+    ]
+    available = [column for column in columns if column in adjustment_history.columns]
+    return adjustment_history[available].copy().rename(
+        columns={
+            "period": "Fiscal period",
+            "metric": "Non-GAAP metric",
+            "adjustment_category": "Normalized category",
+            "adjustment_label": "Issuer-reported adjustment",
+            "adjustment_display": "Reported value",
+            "effect_on_non_gaap": "Effect on non-GAAP",
+            "observed_frequency": "Observed frequency",
+            "period_lifecycle": "Period status",
+            "source_role": "Source type",
+            "source_page": "PDF page",
+            "source_url": "SEC source",
+        }
+    )
+
+
+def tieout_view(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+    columns = [
+        "period",
+        "metric",
+        "gaap_display",
+        "parsed_adjustment_display",
+        "expected_adjustment_display",
+        "variance_display",
+        "non_gaap_display",
+        "detail_line_count",
+        "category_count",
+        "tie_out_status",
+        "tie_out_note",
+        "source_url",
+    ]
+    available = [column for column in columns if column in frame.columns]
+    return frame[available].copy().rename(
+        columns={
+            "period": "Fiscal period",
+            "metric": "Non-GAAP metric",
+            "gaap_display": "GAAP",
+            "parsed_adjustment_display": "Parsed line items",
+            "expected_adjustment_display": "Non-GAAP minus GAAP",
+            "variance_display": "Difference",
+            "non_gaap_display": "Non-GAAP",
+            "detail_line_count": "Detail lines",
+            "category_count": "Categories",
+            "tie_out_status": "Tie-out status",
+            "tie_out_note": "Review note",
             "source_url": "SEC source",
         }
     )
@@ -805,6 +936,12 @@ if not analysis:
 coverage = analysis.get("coverage", pd.DataFrame())
 reconciliations = analysis.get("reconciliations", pd.DataFrame())
 adjustments = analysis.get("adjustments", pd.DataFrame())
+adjustment_history = analysis.get("adjustment_history", pd.DataFrame())
+if adjustment_history.empty and not adjustments.empty:
+    adjustment_history = ng.enrich_adjustments(adjustments, reconciliations)
+adjustment_tieouts = analysis.get("adjustment_tieouts", pd.DataFrame())
+if adjustment_tieouts.empty and not reconciliations.empty:
+    adjustment_tieouts = ng.build_adjustment_tieouts(reconciliations, adjustment_history)
 mentions = analysis.get("mentions", pd.DataFrame())
 sources = analysis.get("sources", pd.DataFrame())
 evidence = analysis.get("evidence", pd.DataFrame())
@@ -822,6 +959,18 @@ st.subheader("Analysis summary")
 periods_analyzed = len(coverage)
 periods_complete = int(coverage["status"].eq("Reconciliation metrics extracted").sum()) if not coverage.empty else 0
 unique_metrics = int(reconciliations["metric"].nunique()) if not reconciliations.empty else 0
+unique_adjustment_categories = (
+    int(adjustment_history["adjustment_category"].nunique())
+    if not adjustment_history.empty and "adjustment_category" in adjustment_history.columns
+    else 0
+)
+repeated_adjustment_categories = (
+    int(
+        ng.adjustment_category_summary(adjustment_history)["periods_observed"].ge(2).sum()
+    )
+    if not adjustment_history.empty
+    else 0
+)
 presentation_docs = (
     int(sources[sources["document_role"].eq("Investor presentation")]["document_url"].nunique())
     if not sources.empty and {"document_role", "document_url"}.issubset(sources.columns)
@@ -833,7 +982,11 @@ with summary_columns[0]:
 with summary_columns[1]:
     render_info_card("Structured metrics", len(reconciliations), f"{unique_metrics} unique metric names")
 with summary_columns[2]:
-    render_info_card("Adjustment rows", len(adjustments), "Line items between GAAP and non-GAAP")
+    render_info_card(
+        "Adjustment rows",
+        len(adjustment_history),
+        f"{unique_adjustment_categories} categories; {repeated_adjustment_categories} repeated across periods",
+    )
 with summary_columns[3]:
     render_info_card("Investor presentations checked", presentation_docs, f"{len(additional)} additional measure callouts")
 
@@ -852,6 +1005,10 @@ else:
 export_payload = dict(analysis)
 export_payload["metric_matrix"] = matrix
 export_payload["trend_analysis"] = trends
+export_payload["adjustment_history"] = adjustment_history
+export_payload["adjustment_category_matrix"] = ng.make_adjustment_metric_matrix(adjustment_history)
+export_payload["adjustment_category_summary"] = ng.adjustment_category_summary(adjustment_history)
+export_payload["adjustment_tieouts"] = adjustment_tieouts
 excel_bytes = build_excel_export(company, st.session_state.analysis_years, analysis, matrix, trends)
 csv_zip_bytes = ng.build_export_zip(export_payload)
 
@@ -880,7 +1037,7 @@ tab_metrics, tab_details, tab_adjustments, tab_additional, tab_sources = st.tabs
     [
         "Quarterly metrics",
         "Reconciliation detail",
-        "Adjustments",
+        "Adjustment history",
         "Additional measures",
         "Source audit",
     ]
@@ -941,11 +1098,27 @@ with tab_details:
                     render_recon_card("Reported non-GAAP", row.get("non_gaap_display", ""), row.get("non_gaap_label", ""))
 
                 pair_id = row.get("pair_id")
-                pair_adjustments = adjustments[adjustments["pair_id"].eq(pair_id)].copy() if not adjustments.empty else pd.DataFrame()
+                pair_adjustments = (
+                    adjustment_history[adjustment_history["pair_id"].eq(pair_id)].copy()
+                    if not adjustment_history.empty and "pair_id" in adjustment_history.columns
+                    else pd.DataFrame()
+                )
                 if not pair_adjustments.empty:
                     st.markdown("**Adjustment bridge**")
-                    bridge = pair_adjustments[["adjustment_label", "adjustment_display"]].rename(
-                        columns={"adjustment_label": "Adjustment", "adjustment_display": "Reported value"}
+                    bridge_columns = [
+                        "adjustment_category",
+                        "adjustment_label",
+                        "adjustment_display",
+                        "observed_frequency",
+                    ]
+                    bridge_columns = [column for column in bridge_columns if column in pair_adjustments.columns]
+                    bridge = pair_adjustments[bridge_columns].rename(
+                        columns={
+                            "adjustment_category": "Normalized category",
+                            "adjustment_label": "Issuer-reported adjustment",
+                            "adjustment_display": "Reported value",
+                            "observed_frequency": "Observed across selected periods",
+                        }
                     )
                     display_dataframe(bridge)
                 else:
@@ -979,46 +1152,297 @@ with tab_details:
                         st.markdown(f"[Open source]({row.get('source_url')})")
 
 with tab_adjustments:
-    st.subheader("Adjustment line items")
+    st.subheader("Non-GAAP adjustment history")
     st.write(
-        "These are the issuer-reported reconciling items found between the comparable GAAP row and the non-GAAP row, such as stock-based compensation, restructuring, amortization, tax effects, or capital expenditures."
+        "The app retains each issuer-reported adjustment label and also assigns a normalized comparison category so that the same type of adjustment can be followed across fiscal periods."
     )
-    if adjustments.empty:
+    st.markdown(
+        '<div class="warning-note"><strong>Do not sum adjustment amounts across different non-GAAP metrics.</strong> '
+        'The same item can appear in gross margin, operating expense, operating income, net income, and EPS reconciliations. '
+        'Use the value matrix for one selected metric; the all-metric matrix shows presence only.</div>',
+        unsafe_allow_html=True,
+    )
+
+    if adjustment_history.empty:
         st.info("No structured adjustment rows were extracted.")
     else:
-        adjustment_periods = sorted(adjustments["period"].dropna().astype(str).unique().tolist(), key=period_sort_key, reverse=True)
-        adjustment_period = st.selectbox("Fiscal period", options=["All periods"] + adjustment_periods, key="adjustment_period_selector")
-        adjustment_view = adjustments.copy()
-        if adjustment_period != "All periods":
-            adjustment_view = adjustment_view[adjustment_view["period"].eq(adjustment_period)]
-        columns = [
-            "period",
-            "metric",
-            "adjustment_label",
-            "adjustment_display",
-            "source_role",
-            "source_page",
-            "source_url",
-        ]
-        columns = [column for column in columns if column in adjustment_view.columns]
-        adjustment_view = adjustment_view[columns].rename(
-            columns={
-                "period": "Fiscal period",
-                "metric": "Non-GAAP metric",
-                "adjustment_label": "Adjustment",
-                "adjustment_display": "Reported value",
-                "source_role": "Source type",
-                "source_page": "PDF page",
-                "source_url": "SEC source",
-            }
+        category_summary = ng.adjustment_category_summary(adjustment_history)
+        adjustment_periods_ascending = ng.ordered_fiscal_periods(adjustment_history)
+        latest_adjustment_period = adjustment_periods_ascending[-1] if adjustment_periods_ascending else ""
+        repeated_categories = (
+            int(category_summary["periods_observed"].ge(2).sum())
+            if not category_summary.empty and "periods_observed" in category_summary.columns
+            else 0
         )
-        display_dataframe(
-            adjustment_view,
-            column_config={
-                "SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")
-            },
-            height=min(760, 140 + 34 * len(adjustment_view)),
+        latest_categories = (
+            int(
+                adjustment_history[adjustment_history["period"].astype(str).eq(latest_adjustment_period)][
+                    "adjustment_category"
+                ].nunique()
+            )
+            if latest_adjustment_period
+            else 0
         )
+        tieout_with_detail = (
+            adjustment_tieouts[adjustment_tieouts["tie_out_status"].ne("No line-item detail")]
+            if not adjustment_tieouts.empty and "tie_out_status" in adjustment_tieouts.columns
+            else pd.DataFrame()
+        )
+        tieout_passes = (
+            int(tieout_with_detail["tie_out_status"].eq("Ties within rounding").sum())
+            if not tieout_with_detail.empty
+            else 0
+        )
+        tieout_rate = (
+            f"{tieout_passes / len(tieout_with_detail):.0%}"
+            if not tieout_with_detail.empty
+            else "n/a"
+        )
+
+        adjustment_kpis = st.columns(4)
+        with adjustment_kpis[0]:
+            render_info_card(
+                "Normalized categories",
+                adjustment_history["adjustment_category"].nunique(),
+                "Issuer labels remain available",
+            )
+        with adjustment_kpis[1]:
+            render_info_card(
+                "Repeated categories",
+                repeated_categories,
+                "Observed in at least two selected periods",
+            )
+        with adjustment_kpis[2]:
+            render_info_card(
+                "Latest-period categories",
+                latest_categories,
+                latest_adjustment_period or "No period",
+            )
+        with adjustment_kpis[3]:
+            render_info_card(
+                "Bridge tie-out rate",
+                tieout_rate,
+                f"{tieout_passes} of {len(tieout_with_detail)} bridges with parsed detail" if not tieout_with_detail.empty else "No detailed bridges",
+            )
+
+        matrix_tab, changes_tab, records_tab, tieout_tab = st.tabs(
+            ["Period matrix", "What changed", "Detailed records", "Tie-out checks"]
+        )
+
+        metric_rank = (
+            adjustment_history.groupby("metric")
+            .agg(periods=("period", "nunique"), rows=("adjustment_label", "size"))
+            .sort_values(["periods", "rows"], ascending=False)
+        )
+        adjustment_metric_options = metric_rank.index.astype(str).tolist()
+
+        with matrix_tab:
+            st.markdown("#### Adjustment values by fiscal period")
+            selected_adjustment_metric = st.selectbox(
+                "Non-GAAP metric",
+                options=adjustment_metric_options,
+                key="adjustment_matrix_metric",
+                help="Amounts are shown within one metric to avoid double counting the same adjustment across several reconciliations.",
+            )
+            adjustment_matrix = ng.make_adjustment_value_matrix(
+                adjustment_history,
+                selected_adjustment_metric,
+            )
+            display_dataframe(
+                adjustment_matrix,
+                height=min(760, 140 + 36 * len(adjustment_matrix)),
+            )
+            st.caption(
+                "Rows use normalized categories; cells retain the amount and sign reported in the matched 8-K exhibit. A blank cell means that category was not parsed for that metric and period."
+            )
+
+            adjustment_chart, adjustment_chart_unit = adjustment_chart_frame(
+                adjustment_history,
+                selected_adjustment_metric,
+            )
+            if not adjustment_chart.empty:
+                st.markdown("#### Adjustment bridge trend")
+                st.bar_chart(adjustment_chart, use_container_width=True)
+                st.caption(
+                    f"Chart unit: {adjustment_chart_unit}. Up to the eight largest categories by absolute value are shown. Positive and negative bars preserve the issuer's bridge direction."
+                )
+
+            with st.expander("Show all-metric category presence"):
+                presence_matrix = ng.make_adjustment_presence_matrix(adjustment_history)
+                display_dataframe(
+                    presence_matrix,
+                    height=min(760, 140 + 36 * len(presence_matrix)),
+                )
+                st.caption(
+                    "This matrix counts affected metrics and parsed rows; it deliberately does not add amounts across metrics."
+                )
+
+        with changes_tab:
+            st.markdown("#### Compare adjustment categories between two fiscal periods")
+            comparison_metric = st.selectbox(
+                "Non-GAAP metric",
+                options=adjustment_metric_options,
+                key="adjustment_compare_metric",
+            )
+            comparison_history = adjustment_history[
+                adjustment_history["metric"].astype(str).eq(comparison_metric)
+            ]
+            comparison_periods = ng.ordered_fiscal_periods(comparison_history)
+            if len(comparison_periods) < 2:
+                st.info("At least two parsed fiscal periods are needed for a period comparison.")
+            else:
+                compare_columns = st.columns(2)
+                with compare_columns[0]:
+                    current_period = st.selectbox(
+                        "Current period",
+                        options=list(reversed(comparison_periods)),
+                        index=0,
+                        key="adjustment_current_period",
+                    )
+                prior_options = [period for period in reversed(comparison_periods) if period != current_period]
+                with compare_columns[1]:
+                    prior_period = st.selectbox(
+                        "Comparison period",
+                        options=prior_options,
+                        index=0,
+                        key="adjustment_prior_period",
+                    )
+                comparison = ng.compare_adjustment_periods(
+                    adjustment_history,
+                    comparison_metric,
+                    current_period,
+                    prior_period,
+                )
+                if comparison.empty:
+                    st.info("No comparable adjustment categories were available.")
+                else:
+                    change_counts = comparison["status"].value_counts()
+                    change_kpis = st.columns(3)
+                    with change_kpis[0]:
+                        render_info_card(
+                            "New",
+                            int(change_counts.get("New in current period", 0)),
+                            f"Present in {current_period}, absent in {prior_period}",
+                        )
+                    with change_kpis[1]:
+                        render_info_card(
+                            "Continued",
+                            int(change_counts.get("Continued", 0)),
+                            "Present in both selected periods",
+                        )
+                    with change_kpis[2]:
+                        render_info_card(
+                            "No longer reported",
+                            int(change_counts.get("No longer reported", 0)),
+                            f"Present in {prior_period}, absent in {current_period}",
+                        )
+                    comparison_view = comparison.rename(
+                        columns={
+                            "status": "Period status",
+                            "adjustment_category": "Normalized category",
+                            "prior_value": prior_period,
+                            "current_value": current_period,
+                            "change": "Change",
+                            "prior_issuer_labels": f"Issuer labels — {prior_period}",
+                            "current_issuer_labels": f"Issuer labels — {current_period}",
+                            "observed_periods": "Periods observed",
+                            "source_url": "SEC source",
+                        }
+                    )
+                    display_dataframe(
+                        comparison_view,
+                        column_config={
+                            "SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")
+                        },
+                        height=min(760, 150 + 40 * len(comparison_view)),
+                    )
+                    st.caption(
+                        "'New' and 'no longer reported' describe the two selected disclosures only; they are not conclusions about whether an item is economically recurring or permissible."
+                    )
+
+        with records_tab:
+            st.markdown("#### Issuer-reported adjustment records")
+            filter_columns = st.columns(3)
+            with filter_columns[0]:
+                record_period = st.selectbox(
+                    "Fiscal period",
+                    options=["All periods"] + list(reversed(adjustment_periods_ascending)),
+                    key="adjustment_record_period",
+                )
+            with filter_columns[1]:
+                record_metric = st.selectbox(
+                    "Metric",
+                    options=["All metrics"] + adjustment_metric_options,
+                    key="adjustment_record_metric",
+                )
+            category_options = sorted(
+                adjustment_history["adjustment_category"].dropna().astype(str).unique().tolist(),
+                key=lambda value: (ng.ADJUSTMENT_CATEGORY_ORDER.get(value, 999), value),
+            )
+            with filter_columns[2]:
+                selected_categories = st.multiselect(
+                    "Categories",
+                    options=category_options,
+                    placeholder="All categories",
+                    key="adjustment_record_categories",
+                )
+            record_view = adjustment_history.copy()
+            if record_period != "All periods":
+                record_view = record_view[record_view["period"].astype(str).eq(record_period)]
+            if record_metric != "All metrics":
+                record_view = record_view[record_view["metric"].astype(str).eq(record_metric)]
+            if selected_categories:
+                record_view = record_view[record_view["adjustment_category"].isin(selected_categories)]
+            record_view = compact_adjustment_history_view(record_view)
+            display_dataframe(
+                record_view,
+                column_config={
+                    "SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")
+                },
+                height=min(820, 150 + 36 * len(record_view)),
+            )
+
+            st.markdown("#### Category dictionary for this issuer")
+            summary_view = category_summary.rename(
+                columns={
+                    "adjustment_category": "Normalized category",
+                    "periods_observed": "Periods observed",
+                    "first_period": "First selected period",
+                    "latest_period": "Latest selected period",
+                    "metrics_affected": "Metrics affected",
+                    "issuer_labels": "Issuer-reported labels",
+                    "recurrence_indicator": "Observed pattern",
+                }
+            )
+            display_dataframe(summary_view, height=min(680, 140 + 38 * len(summary_view)))
+
+        with tieout_tab:
+            st.markdown("#### GAAP-to-non-GAAP bridge controls")
+            st.write(
+                "For each reconciliation, the app compares the sum of parsed line items with the total bridge calculated as non-GAAP minus GAAP. Differences can identify rounding, subtotals, omitted lines, or parsing issues."
+            )
+            if adjustment_tieouts.empty:
+                st.info("No reconciliation tie-out records were created.")
+            else:
+                tieout_statuses = adjustment_tieouts["tie_out_status"].dropna().astype(str).unique().tolist()
+                selected_tieout_status = st.multiselect(
+                    "Tie-out status",
+                    options=sorted(tieout_statuses),
+                    default=sorted(tieout_statuses),
+                    key="adjustment_tieout_status",
+                )
+                filtered_tieouts = adjustment_tieouts[
+                    adjustment_tieouts["tie_out_status"].isin(selected_tieout_status)
+                ] if selected_tieout_status else adjustment_tieouts.iloc[0:0]
+                tieout_display = tieout_view(filtered_tieouts)
+                display_dataframe(
+                    tieout_display,
+                    column_config={
+                        "SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")
+                    },
+                    height=min(820, 150 + 40 * len(tieout_display)),
+                )
+
 
 with tab_additional:
     st.subheader("Other non-GAAP measures discussed in the matched 8-K exhibits")
@@ -1126,11 +1550,15 @@ with tab_sources:
             1. Read recent 10-Q and 10-K filings to obtain `DocumentFiscalYearFocus`, `DocumentFiscalPeriodFocus`, and period-end dates when available.
             2. For each fiscal quarter, score nearby 8-K/8-K/A filings using Item 2.02, Item 9.01, timing, earnings language, period references, and the presence of press-release or presentation exhibits.
             3. Inspect relevant EX-99 HTML, text, and PDF exhibits. Extract a structured pair only where a comparable GAAP row and a non-GAAP/adjusted row can be associated in a reconciliation section.
-            4. Record individual reconciling items between those rows and separately call out additional non-GAAP measures discussed in the matched exhibits.
+            4. Record individual reconciling items between those rows, retain the issuer's exact label, and assign a normalized comparison category.
+            5. Compare categories across issuer fiscal periods and test whether parsed line items tie to non-GAAP minus GAAP.
+            6. Separately call out additional non-GAAP measures discussed in the matched exhibits.
 
             **Review points**
 
             - Issuer formats vary, so every result retains a direct SEC source link and parse-confidence label.
+            - Adjustment categories and new/continued/no-longer-reported labels are descriptive aids, not conclusions about whether an item is permissible or economically recurring.
+            - Do not sum adjustment amounts across different non-GAAP metrics because the same item may be repeated in several reconciliations.
             - The structured value is the first reported numeric column in the matched reconciliation section, which is normally the current fiscal quarter for an earnings release.
             - PDF text extraction depends on an embedded text layer. Image-only slides are identified in the warning log and require manual review.
             - Non-GAAP measures are not standardized across issuers; metric names and definitions should be compared with the source disclosure.
