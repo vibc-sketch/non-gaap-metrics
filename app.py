@@ -328,6 +328,9 @@ with st.sidebar:
     st.header("Issuer")
     lookup = st.text_input("Name or ticker", placeholder="e.g., Microsoft or MSFT")
     sic = st.text_input("SIC code (optional)", placeholder="e.g., 7372")
+    industry = st.text_input("Industry keyword (optional)", placeholder="e.g., software")
+    contact_default = os.getenv("SEC_CONTACT_EMAIL", "")
+    contact = st.text_input("SEC contact email (recommended)", value=contact_default, placeholder="you@company.com")
     search_clicked = st.button("Find issuers", type="primary", use_container_width=True)
     st.markdown("**Supported sources**")
     st.write("8-K / 8-K-A, 10-K / 10-Q exhibits, S-1 / S-1-A")
@@ -335,15 +338,20 @@ with st.sidebar:
     st.write("Issuer fiscal year end → fiscal quarter; not calendar quarter.")
 
 if search_clicked:
-    if not lookup and not sic and not industry:
-        st.warning("Enter a company name/ticker or SIC code.")
+    if not lookup.strip() and not sic.strip() and not industry.strip():
+        st.warning("Enter a company name/ticker, SIC code, or industry keyword.")
     else:
         if contact.strip():
             SEC_HEADERS["User-Agent"] = f"SEC Non-GAAP Metrics Explorer/1.0; {contact.strip()}"
             DATA_HEADERS["User-Agent"] = SEC_HEADERS["User-Agent"]
         with st.spinner("Searching SEC issuer universe…"):
-            res = search_companies(lookup, sic=sic, industry=industry)
-        st.session_state["issuer_search"] = res
+            try:
+                res = search_companies(lookup, sic=sic, industry=industry)
+                st.session_state["issuer_search"] = res
+            except requests.HTTPError as e:
+                st.error(f"SEC request failed ({getattr(e.response, 'status_code', 'HTTP error')}). Check your SEC contact email and try again.")
+            except Exception as e:
+                st.error(f"Search failed: {e}")
 
 results = st.session_state.get("issuer_search", pd.DataFrame())
 if not results.empty:
