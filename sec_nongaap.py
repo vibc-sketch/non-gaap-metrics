@@ -26,7 +26,7 @@ SEC_COMPANY_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 SEC_SIC_LIST = "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
-APP_VERSION = "5.1.1"
+APP_VERSION = "6.0.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -1146,11 +1146,19 @@ def row_label_and_value(cells: list[str]) -> tuple[str, Optional[dict[str, Any]]
 
 
 def row_kind(label: str) -> str:
-    normalized = clean_space(label).replace("–", "-")
+    """Classify a reconciliation row without assuming issuers use a GAAP prefix.
+
+    Many issuers label the comparable GAAP row as ``as reported`` rather than
+    ``GAAP``.  Subtotal rows such as ``Total special items`` are identified
+    separately so they are not double counted with the detailed adjustments.
+    """
+    normalized = clean_space(label).replace("–", "-").replace("—", "-")
     lower = normalized.lower()
-    if re.match(r"^gaap\b", lower):
+    if re.match(r"^(?:total\s+)?(?:special items|non[- ]gaap adjustments?|adjustments?)\b", lower):
+        return "subtotal"
+    if re.match(r"^gaap\b", lower) or re.search(r"\b(?:as reported|reported results?)\b", lower):
         return "gaap"
-    if NON_GAAP_START.match(lower):
+    if NON_GAAP_START.match(lower) or re.search(r"\bnon[- ]gaap\b", lower):
         # "Adjusted for..." can be an adjustment row, not a final metric.
         if re.match(r"^adjusted\s+for\b", lower):
             return "adjustment"
@@ -1728,23 +1736,81 @@ def compare_adjustment_periods(
 
 
 def _find_gaap_match(rows: list[dict[str, Any]], non_gaap_index: int) -> Optional[int]:
+    """Find the comparable GAAP/base row for a non-GAAP result.
+
+    The first pass uses explicit ``GAAP`` or ``as reported`` labels.  A second
+    pass handles common reconciliations whose baseline is plainly comparable
+    but not prefixed with GAAP, such as ``Net cash provided by operating
+    activities`` in a free-cash-flow bridge.
+    """
     target = rows[non_gaap_index]
-    candidates = [index for index, row in enumerate(rows[:non_gaap_index]) if row["kind"] == "gaap"]
+    explicit = [
+        index
+        for index, row in enumerate(rows[:non_gaap_index])
+        if row.get("kind") == "gaap"
+    ]
+    if not explicit:
+        explicit = [index for index, row in enumerate(rows) if row.get("kind") == "gaap"]
+
+    target_key = base_metric_key(target.get("label", ""))
+    section_text = clean_space(target.get("section", "")).lower()
+
+    candidates = explicit
     if not candidates:
-        candidates = [index for index, row in enumerate(rows) if row["kind"] == "gaap"]
+        candidates = []
+        for index, row in enumerate(rows[:non_gaap_index]):
+            label = clean_space(row.get("label", ""))
+            lower = label.lower()
+            if not label or row.get("kind") == "subtotal":
+                continue
+            if re.search(r"^(?:special items|adjustments?|add:|less:)", lower):
+                continue
+            if ADJUSTMENT_TERMS.search(label):
+                continue
+            if re.search(
+                r"\b(?:tax effect|interest expense|interest income|income tax|equity income|"
+                r"capital expenditures?|purchases? of property|depreciation|amortization|"
+                r"stock[- ]based|share[- ]based|restructur|impairment|acquisition)\b",
+                lower,
+            ):
+                continue
+            candidates.append(index)
+
     if not candidates:
         return None
 
-    target_key = base_metric_key(target["label"])
     best_index: Optional[int] = None
-    best_score = -1.0
+    best_score = -999.0
     for index in candidates:
-        key = base_metric_key(rows[index]["label"])
-        similarity = SequenceMatcher(None, target_key, key).ratio()
-        distance_bonus = max(0.0, 0.2 - abs(non_gaap_index - index) * 0.01)
-        if target_key == key and target_key:
-            similarity += 1.0
+        label = clean_space(rows[index].get("label", ""))
+        lower = label.lower()
+        key = base_metric_key(label)
+        similarity = SequenceMatcher(None, target_key, key).ratio() if target_key and key else 0.0
+        distance_bonus = max(0.0, 0.25 - abs(non_gaap_index - index) * 0.012)
         score = similarity + distance_bonus
+        if rows[index].get("kind") == "gaap":
+            score += 2.0
+        if target_key == key and target_key:
+            score += 1.2
+        if index == 0:
+            score += 0.25
+
+        target_lower = clean_space(target.get("label", "")).lower()
+        if "free cash flow" in target_lower and re.search(r"cash (?:provided by|flow from) operating activities", lower):
+            score += 3.0
+        if "ebitda" in target_lower and re.search(r"net income|operating income", lower):
+            score += 2.5
+        if re.search(r"gross (?:profit|margin)", target_lower) and re.search(r"gross (?:profit|margin)", lower):
+            score += 2.0
+        if "operating expense" in target_lower and "operating expense" in lower:
+            score += 2.0
+        if re.search(r"net income|earnings", target_lower) and re.search(r"net income|earnings", lower):
+            score += 1.8
+        if re.search(r"per share|\beps\b", target_lower) and re.search(r"per share|\beps\b", lower):
+            score += 1.8
+        if label.lower() in section_text:
+            score += 0.3
+
         if score > best_score:
             best_score = score
             best_index = index
@@ -1801,25 +1867,42 @@ def build_pairs_from_rows(
                 "source_page": table_meta.get("source_page"),
                 "table_title": table_meta["title"],
                 "confidence": "High" if any(
-                    row["kind"] == "adjustment" for row in section_rows[min(gaap_index, ng_index) + 1 : max(gaap_index, ng_index)]
+                    row.get("kind") in {"adjustment", "subtotal"}
+                    for row in section_rows[min(gaap_index, ng_index) + 1 : max(gaap_index, ng_index)]
                 ) else "Medium",
             }
             pairs.append(pair)
 
             start, end = sorted((gaap_index, ng_index))
-            for adjustment_row in section_rows[start + 1 : end]:
-                if adjustment_row["kind"] != "adjustment":
-                    continue
-                adjustment_unit = infer_unit(
-                    ng_row["label"],
-                    adjustment_row["value_meta"],
-                    table_meta["scale"],
-                )
+            bridge_rows = section_rows[start + 1 : end]
+            detail_rows = [row for row in bridge_rows if row.get("kind") == "adjustment"]
+            subtotal_rows = [row for row in bridge_rows if row.get("kind") == "subtotal"]
+            rows_to_emit = detail_rows if detail_rows else subtotal_rows
+            for adjustment_order, adjustment_row in enumerate(rows_to_emit, start=1):
+                adjustment_meta = adjustment_row["value_meta"]
+                adjustment_label_lower = clean_space(adjustment_row.get("label")).lower()
+                # Reconciliation tables usually print the currency or percent sign only
+                # on the GAAP/non-GAAP endpoint rows. Individual adjustments therefore
+                # inherit the bridge unit unless their own cell or label explicitly
+                # states another unit. This avoids treating dollar gross-margin
+                # adjustments as percentages merely because the label contains "margin".
+                if adjustment_meta.get("currency"):
+                    adjustment_unit = "usd"
+                elif adjustment_meta.get("suffix") == "%" or "%" in adjustment_label_lower or "percentage" in adjustment_label_lower:
+                    adjustment_unit = "percent"
+                elif adjustment_meta.get("suffix") == "bps" or re.search(r"\bbps\b|basis points?", adjustment_label_lower):
+                    adjustment_unit = "bps"
+                elif re.search(r"per share|\beps\b", adjustment_label_lower):
+                    adjustment_unit = "usd_per_share"
+                else:
+                    adjustment_unit = unit
                 adjustments.append(
                     {
                         "pair_id": pair_id,
                         "metric": metric_name,
                         "section": section,
+                        "adjustment_order": adjustment_order,
+                        "is_subtotal": adjustment_row.get("kind") == "subtotal",
                         "adjustment_label": adjustment_row["label"],
                         "adjustment_value": adjustment_row["value"],
                         "adjustment_display": format_value(
@@ -2303,6 +2386,248 @@ def extract_metric_mentions(
     return mentions
 
 
+
+
+BENCHMARK_MEASURE_ORDER = [
+    "Non-GAAP income tax rate",
+    "Non-GAAP other income / expense",
+    "Non-GAAP operating expenses",
+    "Adjusted EBITDA",
+    "Non-GAAP income from operations",
+    "Non-GAAP income from operations %",
+    "Non-GAAP gross margin / gross profit",
+    "Non-GAAP gross margin %",
+    "Non-GAAP net income",
+    "Non-GAAP EPS - basic",
+    "Non-GAAP EPS - diluted",
+    "Free cash flow",
+]
+
+KPI_PATTERNS: list[tuple[str, str]] = [
+    ("Bookings / book-to-bill / backlog", r"\bbookings?\b|\bbook[- ]to[- ]bill\b|\bbacklog\b"),
+    ("Capital expenditures", r"\bcapital expenditures?\b|\bcapex\b|purchases? of (?:property|plant|equipment)"),
+    ("Data center revenue growth", r"\bdata cent(?:er|re)\b.{0,100}\b(?:revenue|sales)\b.{0,80}\b(?:growth|grew|increase|up|%)\b"),
+    ("Free cash flow / FCF margin", r"\b(?:adjusted )?free cash flow\b|\bfcf margin\b"),
+    ("Gross margin", r"\bgross (?:margin|profit)(?: percentage| %)\b|\bgross margin\b"),
+    ("Inventory days / months on hand", r"\binventory\b.{0,80}\b(?:days?|months?)\b.{0,30}\b(?:on hand|on-hand|supply|inventory)\b|\bdays inventory\b"),
+    ("Operating cash flow", r"\boperating cash flow\b|\bnet cash (?:provided by|from) operating activities\b"),
+    ("Operating expenses", r"\boperating expenses?\b|\bopex\b"),
+    ("Operating income / margin", r"\boperating (?:income|profit|margin)\b|\bincome from operations\b"),
+    ("Revenue growth", r"\brevenue\b.{0,90}\b(?:growth|grew|increase(?:d)?|decrease(?:d)?|up|down|year[- ]over[- ]year|yoy)\b|\b(?:growth|grew|increase(?:d)?|decrease(?:d)?)\b.{0,90}\brevenue\b"),
+    ("Revenue", r"\b(?:net )?(?:revenue|sales)\b"),
+]
+
+KPI_ORDER = {name: index for index, (name, _pattern) in enumerate(KPI_PATTERNS, start=1)}
+
+
+def benchmark_metric_family(metric: str, gaap_label: str = "", non_gaap_label: str = "") -> str:
+    """Map issuer-specific metric wording to a presentation-ready peer family."""
+    text = clean_space(" ".join([metric, gaap_label, non_gaap_label])).lower().replace("–", "-")
+    if re.search(r"income tax.*(?:rate|percentage)|tax rate", text):
+        return "Non-GAAP income tax rate"
+    if re.search(r"other (?:income|expense|loss)|interest and other", text):
+        return "Non-GAAP other income / expense"
+    if re.search(r"operating expenses?|opex", text):
+        return "Non-GAAP operating expenses"
+    if "ebitda" in text:
+        return "Adjusted EBITDA"
+    if re.search(r"operating (?:income|profit|margin)|income from operations", text):
+        if re.search(r"margin|percentage|%", text):
+            return "Non-GAAP income from operations %"
+        return "Non-GAAP income from operations"
+    if re.search(r"gross (?:margin|profit)", text):
+        if re.search(r"percentage|%", text):
+            return "Non-GAAP gross margin %"
+        return "Non-GAAP gross margin / gross profit"
+    if re.search(r"net income|earnings", text):
+        if re.search(r"per share|\beps\b", text):
+            if "basic" in text and "diluted" not in text:
+                return "Non-GAAP EPS - basic"
+            return "Non-GAAP EPS - diluted"
+        return "Non-GAAP net income"
+    if "free cash flow" in text:
+        return "Free cash flow"
+    return clean_space(metric) or "Other non-GAAP measure"
+
+
+def extract_kpi_mentions(
+    text: str,
+    source: dict[str, Any],
+    source_page: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Identify operating KPIs discussed in the same 8-K exhibit package.
+
+    The result is a disclosure-presence aid rather than an accounting conclusion.
+    Exact context and the closest reported value are retained for auditability.
+    """
+    compact = re.sub(r"[ \t]+", " ", text or "")
+    rows: list[dict[str, Any]] = []
+    for kpi, pattern in KPI_PATTERNS:
+        candidates: list[dict[str, Any]] = []
+        for match in re.finditer(pattern, compact, re.I | re.S):
+            start = max(0, match.start() - 160)
+            end = min(len(compact), match.end() + 220)
+            context = clean_space(compact[start:end])
+            primary_value = _reported_number(compact, match)
+            numeric_count = len(list(VALUE_PATTERN.finditer(context)))
+            boilerplate = bool(re.search(r"definition|management believes|not a substitute", context, re.I))
+            score = numeric_count * 2 + (5 if primary_value else 0) + (0 if boilerplate else 3)
+            candidates.append({"context": context, "primary_value": primary_value, "score": score})
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda item: item["score"])
+        rows.append(
+            {
+                "kpi": kpi,
+                "primary_value": best["primary_value"],
+                "context": best["context"],
+                "source_role": source.get("role") or "EX-99 exhibit",
+                "source_document": source.get("document") or "",
+                "source_description": source.get("description") or "",
+                "source_url": source.get("url") or "",
+                "source_page": source_page,
+            }
+        )
+    return rows
+
+
+def make_peer_presence_matrix(
+    frame: pd.DataFrame,
+    row_field: str,
+    company_field: str = "company",
+    ordered_rows: Optional[list[str]] = None,
+    minimum_companies: int = 1,
+) -> pd.DataFrame:
+    """Create a dot matrix like the peer-benchmarking slides."""
+    if frame is None or frame.empty or row_field not in frame.columns or company_field not in frame.columns:
+        return pd.DataFrame()
+    data = frame[[row_field, company_field]].dropna().copy()
+    data[row_field] = data[row_field].map(clean_space)
+    data[company_field] = data[company_field].map(clean_space)
+    data = data[(data[row_field] != "") & (data[company_field] != "")].drop_duplicates()
+    if data.empty:
+        return pd.DataFrame()
+    matrix = pd.crosstab(data[row_field], data[company_field]).clip(upper=1)
+    matrix["Total"] = matrix.sum(axis=1)
+    matrix = matrix[matrix["Total"] >= max(1, int(minimum_companies))]
+    if matrix.empty:
+        return pd.DataFrame()
+    order_map = {value: index for index, value in enumerate(ordered_rows or [], start=0)}
+    matrix["_order"] = [order_map.get(index, 9999) for index in matrix.index]
+    matrix["_name"] = matrix.index.astype(str)
+    matrix = matrix.sort_values(["_order", "Total", "_name"], ascending=[True, False, True]).drop(columns=["_order", "_name"])
+    company_columns = sorted([column for column in matrix.columns if column != "Total"])
+    matrix = matrix[company_columns + ["Total"]]
+    matrix = matrix.reset_index().rename(columns={row_field: "Disclosure"})
+    for column in company_columns:
+        matrix[column] = matrix[column].map(lambda value: "●" if int(value) else "")
+    return matrix
+
+
+def make_reconciliation_bridge_table(
+    reconciliations: pd.DataFrame,
+    adjustments: pd.DataFrame,
+    metric: str,
+    periods: Optional[list[str]] = None,
+) -> pd.DataFrame:
+    """Return GAAP -> individual adjustments -> non-GAAP in period columns.
+
+    Exact issuer labels are retained.  The function is intentionally suitable for
+    direct display, Excel export, or a presentation-style HTML renderer.
+    """
+    columns = ["Line item", "Row type"] + list(periods or [])
+    if reconciliations is None or reconciliations.empty:
+        return pd.DataFrame(columns=columns)
+    pairs = reconciliations[reconciliations["metric"].astype(str).eq(str(metric))].copy()
+    if pairs.empty:
+        return pd.DataFrame(columns=columns)
+    available_periods = ordered_fiscal_periods(pairs)
+    selected_periods = [period for period in (periods or available_periods) if period in available_periods]
+    if not selected_periods:
+        selected_periods = available_periods[-2:]
+    pairs = pairs[pairs["period"].astype(str).isin(selected_periods)].copy()
+    if pairs.empty:
+        return pd.DataFrame(columns=["Line item", "Row type"] + selected_periods)
+
+    pair_by_period = {
+        str(row["period"]): row for _, row in pairs.sort_values(["fiscal_year", "fiscal_quarter"]).iterrows()
+    }
+    adjustment_frame = adjustments.copy() if isinstance(adjustments, pd.DataFrame) else pd.DataFrame()
+    if not adjustment_frame.empty:
+        adjustment_frame = adjustment_frame[adjustment_frame["metric"].astype(str).eq(str(metric))].copy()
+
+    line_order: list[str] = []
+    line_meta: dict[str, dict[str, str]] = {}
+    for period in selected_periods:
+        pair = pair_by_period.get(period)
+        if pair is None:
+            continue
+        gaap_key = "__GAAP__"
+        if gaap_key not in line_order:
+            line_order.append(gaap_key)
+        line_meta[gaap_key] = {"label": clean_space(pair.get("gaap_label")) or "Comparable GAAP measure", "type": "GAAP"}
+        pair_id = clean_space(pair.get("pair_id"))
+        period_adjustments = adjustment_frame[
+            adjustment_frame.get("pair_id", pd.Series(dtype=str)).astype(str).eq(pair_id)
+        ] if not adjustment_frame.empty and "pair_id" in adjustment_frame.columns else pd.DataFrame()
+        if not period_adjustments.empty:
+            sort_columns = [column for column in ["adjustment_order", "adjustment_label"] if column in period_adjustments.columns]
+            if sort_columns:
+                period_adjustments = period_adjustments.sort_values(sort_columns)
+            for _, adjustment in period_adjustments.iterrows():
+                label = clean_space(adjustment.get("adjustment_label")) or "Adjustment"
+                key = f"ADJ::{label.lower()}"
+                if key not in line_order:
+                    line_order.append(key)
+                line_meta[key] = {"label": label, "type": "Adjustment"}
+        else:
+            # Keep the endpoint difference visible even when the source table's
+            # individual lines could not be parsed. This makes the review gap
+            # explicit rather than showing a silent GAAP-to-non-GAAP jump.
+            total_key = "__TOTAL_ADJUSTMENTS__"
+            if total_key not in line_order:
+                line_order.append(total_key)
+            line_meta[total_key] = {
+                "label": "Total adjustments (individual items not parsed)",
+                "type": "Adjustment",
+            }
+        ng_key = "__NON_GAAP__"
+        if ng_key not in line_order:
+            line_order.append(ng_key)
+        line_meta[ng_key] = {"label": clean_space(pair.get("non_gaap_label")) or metric, "type": "Non-GAAP"}
+
+    rows: list[dict[str, Any]] = []
+    for key in line_order:
+        row: dict[str, Any] = {"Line item": line_meta[key]["label"], "Row type": line_meta[key]["type"]}
+        for period in selected_periods:
+            pair = pair_by_period.get(period)
+            display = "—"
+            if pair is not None:
+                if key == "__GAAP__":
+                    display = clean_space(pair.get("gaap_display")) or "—"
+                elif key == "__NON_GAAP__":
+                    display = clean_space(pair.get("non_gaap_display")) or "—"
+                elif key == "__TOTAL_ADJUSTMENTS__":
+                    pair_id = clean_space(pair.get("pair_id"))
+                    has_detail = (
+                        not adjustment_frame.empty
+                        and "pair_id" in adjustment_frame.columns
+                        and adjustment_frame["pair_id"].astype(str).eq(pair_id).any()
+                    )
+                    display = "—" if has_detail else (clean_space(pair.get("adjustment_display")) or "—")
+                else:
+                    pair_id = clean_space(pair.get("pair_id"))
+                    label_key = key.removeprefix("ADJ::")
+                    candidates = adjustment_frame[
+                        adjustment_frame.get("pair_id", pd.Series(dtype=str)).astype(str).eq(pair_id)
+                        & adjustment_frame.get("adjustment_label", pd.Series(dtype=str)).astype(str).str.lower().eq(label_key)
+                    ] if not adjustment_frame.empty and {"pair_id", "adjustment_label"}.issubset(adjustment_frame.columns) else pd.DataFrame()
+                    if not candidates.empty:
+                        display = clean_space(candidates.iloc[0].get("adjustment_display")) or "—"
+            row[period] = display
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["Line item", "Row type"] + selected_periods)
+
 def parse_exhibit(
     client: SecClient,
     exhibit: dict[str, Any],
@@ -2330,8 +2655,10 @@ def parse_exhibit(
             evidence.extend(fallback_evidence)
         reconciled_metrics = {pair["metric"] for pair in pairs}
         mentions: list[dict[str, Any]] = []
+        kpis: list[dict[str, Any]] = []
         for page_number, page_text in enumerate(pages, start=1):
             mentions.extend(extract_metric_mentions(page_text, exhibit, reconciled_metrics, source_page=page_number))
+            kpis.extend(extract_kpi_mentions(page_text, exhibit, source_page=page_number))
         document_type = "PDF"
     else:
         document_html = decode_document(resource.content)
@@ -2351,6 +2678,7 @@ def parse_exhibit(
             )
         reconciled_metrics = {pair["metric"] for pair in pairs}
         mentions = extract_metric_mentions(full_text, exhibit, reconciled_metrics)
+        kpis = extract_kpi_mentions(full_text, exhibit)
         document_type = "HTML"
 
     return {
@@ -2364,6 +2692,7 @@ def parse_exhibit(
         "reconciliations": pairs,
         "adjustments": adjustments,
         "mentions": mentions,
+        "kpis": kpis,
         "evidence": evidence,
         "warnings": warnings,
         "text_preview": clean_space(full_text)[:500],
@@ -2392,6 +2721,7 @@ def analyze_company_quarters(
     reconciliation_rows: list[dict[str, Any]] = []
     adjustment_rows: list[dict[str, Any]] = []
     mention_rows: list[dict[str, Any]] = []
+    kpi_rows: list[dict[str, Any]] = []
     source_rows: list[dict[str, Any]] = []
     evidence_rows: list[dict[str, Any]] = []
     warning_rows: list[dict[str, Any]] = []
@@ -2506,6 +2836,7 @@ def analyze_company_quarters(
                     if _metric_name_match(item["metric"], all_reconciled_metrics)
                     else "Additional non-GAAP measure"
                 )
+                item["metric_family"] = benchmark_metric_family(item.get("metric", ""))
                 item["source_has_reconciliation"] = bool(parsed.get("has_reconciliation"))
                 item["source_content_type"] = parsed.get("content_type") or ""
                 mention_rows.append(
@@ -2515,6 +2846,16 @@ def analyze_company_quarters(
                         "period": period_label,
                         "period_end": anchor.get("period_end"),
                         **item,
+                    }
+                )
+            for item in parsed.get("kpis", []):
+                kpi_rows.append(
+                    {
+                        "fiscal_year": fy,
+                        "fiscal_quarter": quarter,
+                        "period": period_label,
+                        "period_end": anchor.get("period_end"),
+                        **dict(item),
                     }
                 )
             for evidence in parsed.get("evidence", []):
@@ -2557,11 +2898,18 @@ def analyze_company_quarters(
     reconciliations_df = pd.DataFrame(reconciliation_rows)
     adjustments_df = pd.DataFrame(adjustment_rows)
     mentions_df = pd.DataFrame(mention_rows)
+    kpis_df = pd.DataFrame(kpi_rows)
     sources_df = pd.DataFrame(source_rows)
     evidence_df = pd.DataFrame(evidence_rows)
     warnings_df = pd.DataFrame(warning_rows)
 
     if not reconciliations_df.empty:
+        reconciliations_df["metric_family"] = reconciliations_df.apply(
+            lambda row: benchmark_metric_family(
+                row.get("metric", ""), row.get("gaap_label", ""), row.get("non_gaap_label", "")
+            ),
+            axis=1,
+        )
         role_rank = {"Press release": 0, "Financial supplement": 1, "Investor presentation": 2, "Other EX-99 exhibit": 3}
         reconciliations_df["role_rank"] = reconciliations_df["source_role"].map(role_rank).fillna(9)
         reconciliations_df = reconciliations_df.sort_values(
@@ -2576,6 +2924,12 @@ def analyze_company_quarters(
         if not reconciliations_df.empty and "pair_id" in reconciliations_df.columns:
             valid_pair_ids = set(reconciliations_df["pair_id"].dropna().astype(str).tolist())
             adjustments_df = adjustments_df[adjustments_df["pair_id"].astype(str).isin(valid_pair_ids)].copy()
+            family_map = reconciliations_df.drop_duplicates("pair_id").set_index("pair_id")["metric_family"].to_dict()
+            adjustments_df["metric_family"] = adjustments_df["pair_id"].map(family_map).fillna(
+                adjustments_df["metric"].map(benchmark_metric_family)
+            )
+        elif "metric" in adjustments_df.columns:
+            adjustments_df["metric_family"] = adjustments_df["metric"].map(benchmark_metric_family)
         duplicate_columns = [
             column
             for column in [
@@ -2596,14 +2950,25 @@ def analyze_company_quarters(
         adjustments_df["_period_rank"] = adjustments_df.apply(
             lambda row: fiscal_period_rank(row.get("fiscal_year"), row.get("fiscal_quarter")), axis=1
         )
-        adjustments_df = adjustments_df.sort_values(
-            ["_period_rank", "metric", "adjustment_label"]
-        ).drop(columns=["_period_rank"]).reset_index(drop=True)
+        adjustment_sort = ["_period_rank", "metric"]
+        if "adjustment_order" in adjustments_df.columns:
+            adjustment_sort.append("adjustment_order")
+        adjustment_sort.append("adjustment_label")
+        adjustments_df = adjustments_df.sort_values(adjustment_sort).drop(
+            columns=["_period_rank"]
+        ).reset_index(drop=True)
 
     if not mentions_df.empty:
         mentions_df = mentions_df.drop_duplicates(
             ["fiscal_year", "fiscal_quarter", "metric", "source_url", "source_page"], keep="first"
         )
+
+    if not kpis_df.empty:
+        kpis_df = kpis_df.drop_duplicates(
+            ["fiscal_year", "fiscal_quarter", "kpi", "source_url", "source_page"], keep="first"
+        )
+        kpis_df["kpi_order"] = kpis_df["kpi"].map(KPI_ORDER).fillna(999).astype(int)
+        kpis_df = kpis_df.sort_values(["fiscal_year", "fiscal_quarter", "kpi_order", "kpi"]).reset_index(drop=True)
 
     adjustment_history_df = enrich_adjustments(adjustments_df, reconciliations_df)
     adjustment_tieouts_df = build_adjustment_tieouts(reconciliations_df, adjustment_history_df)
@@ -2615,6 +2980,7 @@ def analyze_company_quarters(
         "adjustment_history": adjustment_history_df,
         "adjustment_tieouts": adjustment_tieouts_df,
         "mentions": mentions_df,
+        "kpis": kpis_df,
         "sources": sources_df,
         "evidence": evidence_df,
         "warnings": warnings_df,

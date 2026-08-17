@@ -16,7 +16,7 @@ from openpyxl.utils import get_column_letter
 import sec_nongaap as ng
 
 
-APP_NAME = "SEC Earnings 8-K Non-GAAP Analyzer"
+APP_NAME = "SEC Non-GAAP Reconciliation & Peer Benchmarking"
 REQUIRED_ENGINE_API = (
     "enrich_adjustments",
     "build_adjustment_tieouts",
@@ -25,6 +25,10 @@ REQUIRED_ENGINE_API = (
     "make_adjustment_value_matrix",
     "make_adjustment_presence_matrix",
     "compare_adjustment_periods",
+    "benchmark_metric_family",
+    "make_peer_presence_matrix",
+    "make_reconciliation_bridge_table",
+    "extract_kpi_mentions",
 )
 
 
@@ -139,6 +143,59 @@ CUSTOM_CSS = """
   background: rgba(183, 121, 31, 0.08);
   border-radius: 8px;
 }
+.bridge-wrap {
+  overflow-x: auto;
+  margin: 0.6rem 0 1.2rem 0;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+}
+.bridge-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  font-size: 0.94rem;
+}
+.bridge-table th, .bridge-table td {
+  padding: 0.58rem 0.72rem;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.26);
+  text-align: right;
+  white-space: nowrap;
+}
+.bridge-table th:first-child, .bridge-table td:first-child {
+  text-align: left;
+  white-space: normal;
+  min-width: 300px;
+}
+.bridge-table thead tr.company-head th {
+  background: #101418;
+  color: #ffffff;
+  font-size: 1.02rem;
+  border-bottom: none;
+}
+.bridge-table thead tr.period-head th {
+  background: #70ad47;
+  color: #ffffff;
+  font-weight: 700;
+}
+.bridge-table tr.row-gaap td, .bridge-table tr.row-non-gaap td {
+  background: rgba(128, 128, 128, 0.20);
+  font-weight: 700;
+  border-top: 2px solid rgba(20, 20, 20, 0.7);
+}
+.bridge-table tr.row-adjustment td:first-child {
+  padding-left: 1.4rem;
+}
+.matrix-dot {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.peer-note {
+  border-left: 4px solid #70ad47;
+  background: rgba(112, 173, 71, 0.09);
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  margin: 0.55rem 0 1rem 0;
+}
 @media (max-width: 760px) {
   .block-container {
     padding-left: 0.8rem;
@@ -177,6 +234,9 @@ STATE_DEFAULTS: dict[str, Any] = {
     "analysis_years": [],
     "loaded_cik": None,
     "loaded_contact": "",
+    "peer_analysis": None,
+    "peer_companies": pd.DataFrame(),
+    "peer_errors": [],
     "engine_version": None,
 }
 for state_key, default_value in STATE_DEFAULTS.items():
@@ -188,6 +248,9 @@ for state_key, default_value in STATE_DEFAULTS.items():
 if st.session_state.get("engine_version") != APP_VERSION:
     st.session_state.analysis = None
     st.session_state.analysis_years = []
+    st.session_state.peer_analysis = None
+    st.session_state.peer_companies = pd.DataFrame()
+    st.session_state.peer_errors = []
     st.session_state.engine_version = APP_VERSION
 
 
@@ -266,6 +329,9 @@ def reset_loaded_issuer() -> None:
     st.session_state.analysis_years = []
     st.session_state.loaded_cik = None
     st.session_state.loaded_contact = ""
+    st.session_state.peer_analysis = None
+    st.session_state.peer_companies = pd.DataFrame()
+    st.session_state.peer_errors = []
 
 
 def normalized_value(row: pd.Series) -> Optional[float]:
@@ -426,6 +492,94 @@ def style_data_sheet(worksheet: Any, header_row: int = 1) -> None:
         worksheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_length + 2, 12), 55)
 
 
+def build_bridge_export_frame(
+    reconciliations: pd.DataFrame,
+    adjustment_history: pd.DataFrame,
+) -> pd.DataFrame:
+    """Flatten every reconciliation into presentation-order rows for Excel/CSV review."""
+    columns = [
+        "Fiscal period",
+        "Non-GAAP metric",
+        "Row order",
+        "Row type",
+        "Line item",
+        "Reported value",
+        "Normalized adjustment category",
+        "Source type",
+        "SEC source",
+    ]
+    if reconciliations is None or reconciliations.empty:
+        return pd.DataFrame(columns=columns)
+    rows: list[dict[str, Any]] = []
+    recs = reconciliations.copy()
+    recs["_period_rank"] = recs.apply(
+        lambda row: ng.fiscal_period_rank(row.get("fiscal_year"), row.get("fiscal_quarter")), axis=1
+    )
+    recs = recs.sort_values(["_period_rank", "metric"])
+    for _, pair in recs.iterrows():
+        base = {
+            "Fiscal period": clean_text(pair.get("period")),
+            "Non-GAAP metric": clean_text(pair.get("metric")),
+            "Source type": clean_text(pair.get("source_role")),
+            "SEC source": clean_text(pair.get("source_url")),
+        }
+        rows.append(
+            {
+                **base,
+                "Row order": 0,
+                "Row type": "GAAP",
+                "Line item": clean_text(pair.get("gaap_label")),
+                "Reported value": clean_text(pair.get("gaap_display")),
+                "Normalized adjustment category": "",
+            }
+        )
+        pair_id = clean_text(pair.get("pair_id"))
+        details = (
+            adjustment_history[adjustment_history["pair_id"].astype(str).eq(pair_id)].copy()
+            if isinstance(adjustment_history, pd.DataFrame)
+            and not adjustment_history.empty
+            and "pair_id" in adjustment_history.columns
+            else pd.DataFrame()
+        )
+        if not details.empty:
+            sort_columns = [column for column in ["adjustment_order", "adjustment_label"] if column in details.columns]
+            if sort_columns:
+                details = details.sort_values(sort_columns)
+            for offset, (_, detail) in enumerate(details.iterrows(), start=1):
+                rows.append(
+                    {
+                        **base,
+                        "Row order": offset,
+                        "Row type": "Adjustment",
+                        "Line item": clean_text(detail.get("adjustment_label")),
+                        "Reported value": clean_text(detail.get("adjustment_display")),
+                        "Normalized adjustment category": clean_text(detail.get("adjustment_category")),
+                    }
+                )
+        else:
+            rows.append(
+                {
+                    **base,
+                    "Row order": 1,
+                    "Row type": "Adjustment total — detail not parsed",
+                    "Line item": "Total adjustments",
+                    "Reported value": clean_text(pair.get("adjustment_display")),
+                    "Normalized adjustment category": "",
+                }
+            )
+        rows.append(
+            {
+                **base,
+                "Row order": 999,
+                "Row type": "Non-GAAP",
+                "Line item": clean_text(pair.get("non_gaap_label")),
+                "Reported value": clean_text(pair.get("non_gaap_display")),
+                "Normalized adjustment category": "",
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def build_excel_export(
     company: dict[str, Any],
     selected_years: list[int],
@@ -447,6 +601,7 @@ def build_excel_export(
         adjustment_tieouts = ng.build_adjustment_tieouts(reconciliations, adjustment_history)
     adjustment_matrix = ng.make_adjustment_metric_matrix(adjustment_history)
     adjustment_summary = ng.adjustment_category_summary(adjustment_history)
+    presentation_bridges = build_bridge_export_frame(reconciliations, adjustment_history)
 
     summary = pd.DataFrame(
         {
@@ -482,12 +637,14 @@ def build_excel_export(
         ("Metric matrix", matrix),
         ("Trend analysis", trends),
         ("Reconciliations", reconciliations),
+        ("Presentation bridges", presentation_bridges),
         ("Adjustment history", adjustment_history),
         ("Adjustment matrix", adjustment_matrix),
         ("Adjustment summary", adjustment_summary),
         ("Adjustment tie-outs", adjustment_tieouts),
         ("Raw adjustments", raw_adjustments),
         ("Additional measures", additional),
+        ("KPIs in 8-K package", analysis.get("kpis", pd.DataFrame())),
         ("Coverage", analysis.get("coverage", pd.DataFrame())),
         ("Source audit", analysis.get("sources", pd.DataFrame())),
         ("Evidence", analysis.get("evidence", pd.DataFrame())),
@@ -733,6 +890,181 @@ def source_audit_view(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def render_bridge_table(
+    frame: pd.DataFrame,
+    title: str,
+    subtitle: str = "",
+    source_url: str = "",
+) -> None:
+    """Render a presentation-style GAAP -> adjustments -> non-GAAP table."""
+    if frame is None or frame.empty:
+        st.info("No structured bridge rows were available for this selection.")
+        return
+    period_columns = [column for column in frame.columns if column not in {"Line item", "Row type"}]
+    header_cells = "".join(f"<th>{esc(column)}</th>" for column in period_columns)
+    body_rows: list[str] = []
+    for _, row in frame.iterrows():
+        row_type = clean_text(row.get("Row type")).lower().replace(" ", "-")
+        row_class = {
+            "gaap": "row-gaap",
+            "non-gaap": "row-non-gaap",
+            "adjustment": "row-adjustment",
+        }.get(row_type, "")
+        values = "".join(f"<td>{esc(row.get(column, '—'))}</td>" for column in period_columns)
+        body_rows.append(
+            f'<tr class="{row_class}"><td>{esc(row.get("Line item", ""))}</td>{values}</tr>'
+        )
+    subtitle_html = f'<div class="small-note" style="margin:0.2rem 0 0.45rem 0;">{esc(subtitle)}</div>' if subtitle else ""
+    link_html = f'<div class="small-note" style="margin-top:0.45rem;"><a href="{esc(source_url)}" target="_blank">Open SEC source exhibit</a></div>' if source_url else ""
+    st.markdown(
+        f"""
+        {subtitle_html}
+        <div class="bridge-wrap">
+          <table class="bridge-table">
+            <thead>
+              <tr class="company-head"><th colspan="{len(period_columns) + 1}">{esc(title)}</th></tr>
+              <tr class="period-head"><th>Reconciliation line item</th>{header_cells}</tr>
+            </thead>
+            <tbody>{''.join(body_rows)}</tbody>
+          </table>
+        </div>
+        {link_html}
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _first_ticker(company_record: dict[str, Any]) -> str:
+    return clean_text(company_record.get("ticker")).split(",")[0].strip().upper()
+
+
+def _append_company_columns(frame: pd.DataFrame, company_record: dict[str, Any]) -> pd.DataFrame:
+    data = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if data.empty:
+        return data
+    label = _first_ticker(company_record) or clean_text(company_record.get("name"))
+    data.insert(0, "company", label)
+    data.insert(1, "company_name", clean_text(company_record.get("name")))
+    data.insert(2, "cik", company_record.get("cik"))
+    return data
+
+
+def combine_peer_results(results: list[tuple[dict[str, Any], dict[str, pd.DataFrame]]]) -> dict[str, pd.DataFrame]:
+    keys = {
+        "coverage",
+        "reconciliations",
+        "adjustments",
+        "adjustment_history",
+        "adjustment_tieouts",
+        "mentions",
+        "kpis",
+        "sources",
+        "evidence",
+        "warnings",
+    }
+    combined: dict[str, pd.DataFrame] = {}
+    for key in keys:
+        frames = [
+            _append_company_columns(analysis.get(key, pd.DataFrame()), company_record)
+            for company_record, analysis in results
+        ]
+        frames = [frame for frame in frames if not frame.empty]
+        combined[key] = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    return combined
+
+
+def resolve_exact_ticker(client: ng.SecClient, ticker: str) -> Optional[dict[str, Any]]:
+    ticker = clean_text(ticker).upper()
+    if not ticker:
+        return None
+    matches = ng.search_companies(client, query=ticker, limit=30)
+    if matches.empty:
+        return None
+    exact = matches[matches["ticker"].astype(str).str.upper().eq(ticker)]
+    row = exact.iloc[0] if not exact.empty else matches.iloc[0]
+    return {"cik": int(row["cik"]), "ticker": clean_text(row.get("ticker")), "name": clean_text(row.get("name"))}
+
+
+def analyze_peer_company(
+    client: ng.SecClient,
+    issuer: dict[str, Any],
+    progress: Optional[Any] = None,
+    max_exhibits: int = 6,
+) -> tuple[dict[str, Any], dict[str, pd.DataFrame]]:
+    cik = int(issuer["cik"])
+    submissions = ng.load_company_submissions(client, cik)
+    company_record = ng.company_record(submissions)
+    filings = ng.load_all_filings(client, submissions, years_back=5, max_history_files=5)
+    anchors = ng.build_period_anchors(
+        client,
+        cik,
+        filings,
+        company_record.get("fiscal_year_end", ""),
+        max_periodic_filings=20,
+        progress=progress,
+    )
+    if anchors.empty:
+        raise ValueError("No recent 10-Q/10-K fiscal-period anchors were found.")
+    years = sorted({int(value) for value in anchors["fiscal_year"].dropna().tolist()}, reverse=True)[:2]
+    analysis = ng.analyze_company_quarters(
+        client,
+        cik,
+        filings,
+        anchors,
+        years,
+        progress=progress,
+        max_exhibits_per_8k=max_exhibits,
+    )
+    return company_record, analysis
+
+
+def build_measure_presence_source(peer_analysis: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    reconciliations = peer_analysis.get("reconciliations", pd.DataFrame())
+    mentions = peer_analysis.get("mentions", pd.DataFrame())
+    if not reconciliations.empty:
+        recs = reconciliations.copy()
+        if "metric_family" not in recs.columns:
+            recs["metric_family"] = recs.apply(
+                lambda row: ng.benchmark_metric_family(
+                    row.get("metric", ""), row.get("gaap_label", ""), row.get("non_gaap_label", "")
+                ),
+                axis=1,
+            )
+        frames.append(recs[["company", "metric_family"]])
+    if not mentions.empty:
+        mention_data = mentions.copy()
+        if "metric_family" not in mention_data.columns:
+            mention_data["metric_family"] = mention_data["metric"].map(ng.benchmark_metric_family)
+        frames.append(mention_data[["company", "metric_family"]])
+    return pd.concat(frames, ignore_index=True).drop_duplicates() if frames else pd.DataFrame(columns=["company", "metric_family"])
+
+
+def peer_matrix_highlight(matrix: pd.DataFrame, noun: str) -> str:
+    if matrix is None or matrix.empty:
+        return ""
+    company_columns = [column for column in matrix.columns if column not in {"Disclosure", "Total"}]
+    common_row = matrix.sort_values("Total", ascending=False).iloc[0]
+    counts = {column: int(matrix[column].astype(str).eq("●").sum()) for column in company_columns}
+    broadest = max(counts, key=counts.get) if counts else ""
+    return (
+        f"Most common {noun}: **{common_row['Disclosure']}** ({int(common_row['Total'])} peers). "
+        f"Broadest coverage in this selected set: **{broadest}** ({counts.get(broadest, 0)} rows)."
+    )
+
+
+def peer_company_count_frame(matrix: pd.DataFrame, column_label: str) -> pd.DataFrame:
+    """Count disclosure rows by peer, matching the bar charts in the benchmark deck."""
+    if matrix is None or matrix.empty:
+        return pd.DataFrame()
+    company_columns = [column for column in matrix.columns if column not in {"Disclosure", "Total"}]
+    rows = [
+        {"Peer": company, column_label: int(matrix[company].astype(str).eq("●").sum())}
+        for company in company_columns
+    ]
+    return pd.DataFrame(rows).sort_values(column_label, ascending=True).set_index("Peer")
+
+
 st.markdown('<div class="app-kicker">Evidence-first SEC filing analysis</div>', unsafe_allow_html=True)
 st.title(APP_NAME)
 st.caption(
@@ -893,6 +1225,9 @@ with st.sidebar:
                     )
                     st.session_state.analysis = analysis
                     st.session_state.analysis_years = [int(year) for year in selected_years]
+                    st.session_state.peer_analysis = None
+                    st.session_state.peer_companies = pd.DataFrame()
+                    st.session_state.peer_errors = []
                     status.update(label="Analysis complete.", state="complete", expanded=False)
                 except Exception as exc:
                     st.error(f"The analysis could not be completed: {exc}")
@@ -988,6 +1323,7 @@ adjustment_tieouts = analysis.get("adjustment_tieouts", pd.DataFrame())
 if adjustment_tieouts.empty and not reconciliations.empty:
     adjustment_tieouts = ng.build_adjustment_tieouts(reconciliations, adjustment_history)
 mentions = analysis.get("mentions", pd.DataFrame())
+kpis = analysis.get("kpis", pd.DataFrame())
 sources = analysis.get("sources", pd.DataFrame())
 evidence = analysis.get("evidence", pd.DataFrame())
 warnings = analysis.get("warnings", pd.DataFrame())
@@ -1042,8 +1378,9 @@ if reconciliations.empty:
     )
 else:
     st.markdown(
-        '<div class="success-note"><strong>The metrics are in the Quarterly metrics and Reconciliation detail tabs below.</strong> '
-        'Each row includes the GAAP value, total adjustments, non-GAAP value, fiscal period, source type, and direct SEC link.</div>',
+        '<div class="success-note"><strong>Start with Presentation bridges.</strong> '
+        'It shows the comparable GAAP line, every parsed issuer-reported adjustment, and the non-GAAP endpoint in fiscal-period columns. '
+        'Quarterly metrics and Adjustment history provide the trend and audit views.</div>',
         unsafe_allow_html=True,
     )
 
@@ -1078,15 +1415,117 @@ with download_columns[2]:
     st.caption("Exports preserve fiscal-period labels, source URLs, parsing evidence, and warnings for review.")
 
 
-tab_metrics, tab_details, tab_adjustments, tab_additional, tab_sources = st.tabs(
+tab_bridge, tab_metrics, tab_details, tab_adjustments, tab_additional, tab_peer, tab_sources = st.tabs(
     [
+        "Presentation bridges",
         "Quarterly metrics",
         "Reconciliation detail",
         "Adjustment history",
         "Additional measures",
+        "Peer benchmark",
         "Source audit",
     ]
 )
+
+with tab_bridge:
+    st.subheader("Presentation-style reconciliation bridges")
+    st.write(
+        "This view reproduces the core structure used in benchmarking presentations: the comparable GAAP result, "
+        "the issuer's individual reconciling items in reported order, and the non-GAAP result across fiscal periods."
+    )
+    if reconciliations.empty:
+        st.info("No structured reconciliation pairs were extracted. Use Source audit to inspect the matched exhibit and parsing evidence.")
+    else:
+        bridge_metric_options = (
+            reconciliations.groupby("metric")
+            .agg(periods=("period", "nunique"), rows=("pair_id", "size"))
+            .sort_values(["periods", "rows"], ascending=False)
+            .index.astype(str).tolist()
+        )
+        preferred_index = next(
+            (index for index, value in enumerate(bridge_metric_options) if "gross margin" in value.lower() or "gross profit" in value.lower()),
+            0,
+        )
+        selected_bridge_metric = st.selectbox(
+            "Non-GAAP measure",
+            options=bridge_metric_options,
+            index=preferred_index,
+            key="presentation_bridge_metric",
+        )
+        bridge_metric_rows = reconciliations[
+            reconciliations["metric"].astype(str).eq(selected_bridge_metric)
+        ].copy()
+        bridge_period_options = ng.ordered_fiscal_periods(bridge_metric_rows)
+        title_label = clean_text(company.get("name")) or clean_text(company.get("ticker"))
+        selected_bridge_periods = st.multiselect(
+            "Fiscal-period columns (maximum two)",
+            options=bridge_period_options,
+            default=bridge_period_options[-2:],
+            max_selections=2,
+            key="presentation_bridge_periods",
+        )
+        if not selected_bridge_periods:
+            st.info("Select one or two fiscal periods.")
+        else:
+            bridge_frame = ng.make_reconciliation_bridge_table(
+                reconciliations,
+                adjustment_history,
+                selected_bridge_metric,
+                selected_bridge_periods,
+            )
+            source_rows_for_bridge = bridge_metric_rows[
+                bridge_metric_rows["period"].astype(str).isin(selected_bridge_periods)
+            ].sort_values(["fiscal_year", "fiscal_quarter"], ascending=[False, False])
+            bridge_source = (
+                clean_text(source_rows_for_bridge.iloc[0].get("source_url"))
+                if not source_rows_for_bridge.empty
+                else ""
+            )
+            render_bridge_table(
+                bridge_frame,
+                f"{title_label} — {selected_bridge_metric}",
+                "Values and line-item labels are preserved from the matched earnings 8-K exhibit; columns follow issuer fiscal periods.",
+                bridge_source,
+            )
+            if bridge_frame["Line item"].astype(str).str.contains("individual items not parsed", case=False).any():
+                st.warning(
+                    "At least one period has a GAAP-to-non-GAAP endpoint difference but no parsed line-item detail. "
+                    "Open the linked exhibit and review Source audit; the app marks the gap rather than hiding it."
+                )
+            period_links = source_rows_for_bridge[["period", "source_role", "source_url"]].drop_duplicates()
+            if not period_links.empty:
+                st.markdown("**Source exhibits by period**")
+                link_view = period_links.rename(
+                    columns={"period": "Fiscal period", "source_role": "Document role", "source_url": "SEC source"}
+                )
+                display_dataframe(
+                    link_view,
+                    column_config={"SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")},
+                    height=min(280, 90 + 36 * len(link_view)),
+                )
+
+        show_latest_bridges = st.toggle(
+            "Show every reconciliation for the latest analyzed fiscal period",
+            value=False,
+            key="show_latest_bridges",
+        )
+        if show_latest_bridges:
+            all_periods = ng.ordered_fiscal_periods(reconciliations)
+            latest_period = all_periods[-1] if all_periods else ""
+            st.markdown(f"#### All parsed bridges — {latest_period}")
+            latest_rows = reconciliations[reconciliations["period"].astype(str).eq(latest_period)].copy()
+            for metric_name in sorted(latest_rows["metric"].dropna().astype(str).unique().tolist()):
+                metric_bridge = ng.make_reconciliation_bridge_table(
+                    reconciliations, adjustment_history, metric_name, [latest_period]
+                )
+                metric_source_rows = latest_rows[latest_rows["metric"].astype(str).eq(metric_name)]
+                metric_source = clean_text(metric_source_rows.iloc[0].get("source_url")) if not metric_source_rows.empty else ""
+                render_bridge_table(
+                    metric_bridge,
+                    f"{title_label} — {metric_name}",
+                    latest_period,
+                    metric_source,
+                )
 
 with tab_metrics:
     st.subheader("Two-year fiscal-quarter metric matrix")
@@ -1544,6 +1983,349 @@ with tab_additional:
                 )
                 if clean_text(row.get("source_url")):
                     st.markdown(f"[Open source]({row.get('source_url')})")
+
+with tab_peer:
+    st.subheader("Peer benchmarking from earnings 8-K exhibit packages")
+    st.write(
+        "Build presentation-ready disclosure matrices for non-GAAP measures, adjustment types, and operating KPIs, "
+        "then open comparable GAAP-to-non-GAAP bridges for each selected company. Each peer is normalized to its own fiscal year end."
+    )
+    st.markdown(
+        '<div class="peer-note"><strong>Scope:</strong> Peer metrics, adjustments, and KPIs come from matched earnings 8-K EX-99 exhibits, '
+        'including investor-presentation PDFs. Periodic filings are used only to anchor fiscal periods.</div>',
+        unsafe_allow_html=True,
+    )
+
+    current_ticker = _first_ticker(company)
+    default_peer_text = current_ticker
+    peer_text = st.text_area(
+        "Peer tickers (comma, space, or one per line; maximum eight)",
+        value=default_peer_text,
+        placeholder="LSCC, MCHP, AMD, MRVL, QUIK",
+        key="peer_ticker_input",
+        help="The current issuer can be reused without a second SEC analysis. Add public-company tickers for a live peer set.",
+    )
+    peer_control_columns = st.columns([1, 1, 2])
+    with peer_control_columns[0]:
+        peer_max_exhibits = st.number_input(
+            "EX-99 exhibits per peer",
+            min_value=3,
+            max_value=10,
+            value=6,
+            step=1,
+            key="peer_max_exhibits",
+        )
+    with peer_control_columns[1]:
+        minimum_peer_disclosures = st.number_input(
+            "Minimum peers per row",
+            min_value=1,
+            max_value=8,
+            value=1,
+            step=1,
+            key="peer_minimum_disclosures",
+        )
+    with peer_control_columns[2]:
+        st.caption(
+            "Peer runs can take several minutes because the app retrieves each issuer's fiscal anchors, matching 8-K, press release, supplement, and presentation."
+        )
+
+    run_peer_analysis = st.button(
+        "Run peer benchmark",
+        type="primary",
+        use_container_width=True,
+        key="run_peer_benchmark",
+    )
+    if run_peer_analysis:
+        raw_tickers = [
+            token.upper()
+            for token in re.split(r"[\s,;]+", peer_text or "")
+            if clean_text(token)
+        ]
+        tickers: list[str] = []
+        for ticker in raw_tickers:
+            if ticker not in tickers:
+                tickers.append(ticker)
+        if current_ticker and current_ticker not in tickers:
+            tickers.insert(0, current_ticker)
+        tickers = tickers[:8]
+
+        if not ng.SecClient.valid_contact(contact_email):
+            st.error("Enter a valid SEC contact email before running the peer benchmark.")
+        elif not tickers:
+            st.error("Enter at least one ticker.")
+        else:
+            peer_results: list[tuple[dict[str, Any], dict[str, pd.DataFrame]]] = []
+            peer_company_rows: list[dict[str, Any]] = []
+            peer_errors: list[dict[str, str]] = []
+            peer_status = st.status("Starting peer benchmark...", expanded=True)
+            client = get_client(contact_email.strip())
+
+            for peer_index, ticker in enumerate(tickers, start=1):
+                try:
+                    peer_status.update(
+                        label=f"Peer {peer_index} of {len(tickers)}: resolving {ticker}...",
+                        state="running",
+                    )
+                    if ticker == current_ticker:
+                        peer_company = dict(company)
+                        peer_result = analysis
+                    else:
+                        resolved = resolve_exact_ticker(client, ticker)
+                        if resolved is None:
+                            raise ValueError("Ticker was not found in the SEC company-ticker universe.")
+
+                        def peer_progress(message: str, _ticker: str = ticker) -> None:
+                            peer_status.update(label=f"{_ticker}: {message}", state="running")
+
+                        peer_company, peer_result = analyze_peer_company(
+                            client,
+                            resolved,
+                            progress=peer_progress,
+                            max_exhibits=int(peer_max_exhibits),
+                        )
+                    peer_results.append((peer_company, peer_result))
+                    peer_company_rows.append(
+                        {
+                            "Ticker": _first_ticker(peer_company),
+                            "Company": clean_text(peer_company.get("name")),
+                            "CIK": peer_company.get("cik"),
+                            "SIC": peer_company.get("sic"),
+                            "Fiscal year end": fye_display(clean_text(peer_company.get("fiscal_year_end"))),
+                            "Structured reconciliations": len(peer_result.get("reconciliations", pd.DataFrame())),
+                            "Parsed adjustment rows": len(peer_result.get("adjustment_history", pd.DataFrame())),
+                        }
+                    )
+                except Exception as exc:
+                    peer_errors.append({"Ticker": ticker, "Error": clean_text(exc)})
+
+            st.session_state.peer_analysis = combine_peer_results(peer_results) if peer_results else None
+            st.session_state.peer_companies = pd.DataFrame(peer_company_rows)
+            st.session_state.peer_errors = peer_errors
+            if peer_results:
+                peer_status.update(
+                    label=f"Peer benchmark complete for {len(peer_results)} company(ies).",
+                    state="complete",
+                    expanded=False,
+                )
+            else:
+                peer_status.update(
+                    label="No peer analyses completed.",
+                    state="error",
+                    expanded=True,
+                )
+
+    peer_analysis = st.session_state.peer_analysis
+    if not peer_analysis:
+        st.info("Enter peer tickers and run the benchmark to create the disclosure matrices and company reconciliation tables.")
+    else:
+        peer_companies = st.session_state.peer_companies
+        if isinstance(peer_companies, pd.DataFrame) and not peer_companies.empty:
+            st.markdown("#### Companies included")
+            display_dataframe(peer_companies, height=min(360, 90 + 36 * len(peer_companies)))
+
+        if st.session_state.peer_errors:
+            with st.expander(f"Peer warnings ({len(st.session_state.peer_errors)})", expanded=False):
+                display_dataframe(pd.DataFrame(st.session_state.peer_errors))
+
+        peer_download = ng.build_export_zip(peer_analysis)
+        st.download_button(
+            "Download peer benchmark CSV package",
+            data=peer_download,
+            file_name="non_gaap_peer_benchmark.csv.zip",
+            mime="application/zip",
+            key="download_peer_benchmark",
+        )
+
+        peer_measure_tab, peer_adjustment_tab, peer_kpi_tab, peer_bridge_tab = st.tabs(
+            ["Non-GAAP measures", "Adjustment types", "Operating KPIs", "Detailed peer bridges"]
+        )
+
+        with peer_measure_tab:
+            measure_source = build_measure_presence_source(peer_analysis)
+            measure_matrix_all = ng.make_peer_presence_matrix(
+                measure_source,
+                row_field="metric_family",
+                ordered_rows=ng.BENCHMARK_MEASURE_ORDER,
+                minimum_companies=1,
+            )
+            measure_matrix = ng.make_peer_presence_matrix(
+                measure_source,
+                row_field="metric_family",
+                ordered_rows=ng.BENCHMARK_MEASURE_ORDER,
+                minimum_companies=int(minimum_peer_disclosures),
+            )
+            st.markdown("#### Non-GAAP measures | Peer benchmarking")
+            if measure_matrix.empty:
+                st.info("No peer measure matrix could be created from the selected analyses.")
+            else:
+                display_dataframe(measure_matrix, height=min(720, 120 + 36 * len(measure_matrix)))
+                highlight = peer_matrix_highlight(measure_matrix, "measure")
+                if highlight:
+                    st.markdown(highlight)
+                measure_counts = peer_company_count_frame(
+                    measure_matrix_all, "Number of non-GAAP measures"
+                )
+                st.markdown("##### Peers by number of non-GAAP measure disclosures")
+                st.bar_chart(measure_counts, use_container_width=True)
+
+        with peer_adjustment_tab:
+            peer_adjustments = peer_analysis.get("adjustment_history", pd.DataFrame())
+            st.markdown("#### Non-GAAP adjustment types | Peer benchmarking")
+            if peer_adjustments.empty:
+                st.info("No structured peer adjustment rows were extracted.")
+            else:
+                adjustment_order_rows = [
+                    name for name, _rank in sorted(ng.ADJUSTMENT_CATEGORY_ORDER.items(), key=lambda item: item[1])
+                ]
+                adjustment_matrix_peer_all = ng.make_peer_presence_matrix(
+                    peer_adjustments,
+                    row_field="adjustment_category",
+                    ordered_rows=adjustment_order_rows,
+                    minimum_companies=1,
+                )
+                adjustment_matrix_peer = ng.make_peer_presence_matrix(
+                    peer_adjustments,
+                    row_field="adjustment_category",
+                    ordered_rows=adjustment_order_rows,
+                    minimum_companies=int(minimum_peer_disclosures),
+                )
+                display_dataframe(
+                    adjustment_matrix_peer,
+                    height=min(720, 120 + 36 * len(adjustment_matrix_peer)),
+                )
+                highlight = peer_matrix_highlight(adjustment_matrix_peer, "adjustment type")
+                if highlight:
+                    st.markdown(highlight)
+                if not adjustment_matrix_peer.empty:
+                    adjustment_counts = peer_company_count_frame(
+                        adjustment_matrix_peer_all, "Number of adjustment types"
+                    )
+                    st.markdown("##### Peers by number of non-GAAP adjustment types")
+                    st.bar_chart(adjustment_counts, use_container_width=True)
+                st.caption(
+                    "A dot means the adjustment type appeared in at least one parsed reconciliation for that company. "
+                    "Counts are disclosure presence, not additive amounts."
+                )
+
+        with peer_kpi_tab:
+            peer_kpis = peer_analysis.get("kpis", pd.DataFrame())
+            st.markdown("#### Key performance indicators | Peer benchmarking")
+            if peer_kpis.empty:
+                st.info("No KPI mentions were extracted from the selected earnings 8-K exhibit packages.")
+            else:
+                kpi_matrix_all = ng.make_peer_presence_matrix(
+                    peer_kpis,
+                    row_field="kpi",
+                    ordered_rows=[label for label, _ in ng.KPI_PATTERNS],
+                    minimum_companies=1,
+                )
+                kpi_matrix = ng.make_peer_presence_matrix(
+                    peer_kpis,
+                    row_field="kpi",
+                    ordered_rows=[label for label, _ in ng.KPI_PATTERNS],
+                    minimum_companies=int(minimum_peer_disclosures),
+                )
+                display_dataframe(kpi_matrix, height=min(720, 120 + 36 * len(kpi_matrix)))
+                highlight = peer_matrix_highlight(kpi_matrix, "KPI")
+                if highlight:
+                    st.markdown(highlight)
+                if not kpi_matrix.empty:
+                    kpi_counts = peer_company_count_frame(kpi_matrix_all, "Number of KPIs")
+                    st.markdown("##### Peers by number of KPI disclosures")
+                    st.bar_chart(kpi_counts, use_container_width=True)
+                with st.expander("KPI source context", expanded=False):
+                    kpi_columns = [
+                        column
+                        for column in ["company", "period", "kpi", "primary_value", "source_role", "source_url", "context"]
+                        if column in peer_kpis.columns
+                    ]
+                    kpi_view = peer_kpis[kpi_columns].rename(
+                        columns={
+                            "company": "Peer",
+                            "period": "Fiscal period",
+                            "kpi": "KPI",
+                            "primary_value": "Nearby value",
+                            "source_role": "Source type",
+                            "source_url": "SEC source",
+                            "context": "Disclosure context",
+                        }
+                    )
+                    display_dataframe(
+                        kpi_view,
+                        column_config={"SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")},
+                        height=min(720, 140 + 36 * len(kpi_view)),
+                    )
+
+        with peer_bridge_tab:
+            peer_reconciliations = peer_analysis.get("reconciliations", pd.DataFrame())
+            peer_adjustment_history = peer_analysis.get("adjustment_history", pd.DataFrame())
+            st.markdown("#### Comparable reconciliation tables by peer")
+            if peer_reconciliations.empty:
+                st.info("No structured peer reconciliations were available.")
+            else:
+                if "metric_family" not in peer_reconciliations.columns:
+                    peer_reconciliations = peer_reconciliations.copy()
+                    peer_reconciliations["metric_family"] = peer_reconciliations.apply(
+                        lambda row: ng.benchmark_metric_family(
+                            row.get("metric", ""), row.get("gaap_label", ""), row.get("non_gaap_label", "")
+                        ),
+                        axis=1,
+                    )
+                family_options = sorted(
+                    peer_reconciliations["metric_family"].dropna().astype(str).unique().tolist()
+                )
+                preferred_family_index = next(
+                    (index for index, value in enumerate(family_options) if "gross margin" in value.lower()),
+                    0,
+                )
+                selected_family = st.selectbox(
+                    "Comparable non-GAAP measure family",
+                    options=family_options,
+                    index=preferred_family_index,
+                    key="peer_bridge_family",
+                )
+                family_rows = peer_reconciliations[
+                    peer_reconciliations["metric_family"].astype(str).eq(selected_family)
+                ].copy()
+                companies_in_family = sorted(family_rows["company"].dropna().astype(str).unique().tolist())
+                st.caption(
+                    "Each table keeps the issuer's exact labels and its two latest analyzed fiscal-period columns. "
+                    "The selected family only aligns comparable disclosure types across companies."
+                )
+                for peer_label in companies_in_family:
+                    company_rows = family_rows[family_rows["company"].astype(str).eq(peer_label)].copy()
+                    metric_rank = (
+                        company_rows.groupby("metric")
+                        .agg(periods=("period", "nunique"), rows=("pair_id", "size"))
+                        .sort_values(["periods", "rows"], ascending=False)
+                    )
+                    if metric_rank.empty:
+                        continue
+                    peer_metric = str(metric_rank.index[0])
+                    metric_rows = company_rows[company_rows["metric"].astype(str).eq(peer_metric)].copy()
+                    peer_periods = ng.ordered_fiscal_periods(metric_rows)[-2:]
+                    peer_adjustments_for_company = (
+                        peer_adjustment_history[
+                            peer_adjustment_history["company"].astype(str).eq(peer_label)
+                        ].copy()
+                        if not peer_adjustment_history.empty and "company" in peer_adjustment_history.columns
+                        else pd.DataFrame()
+                    )
+                    bridge = ng.make_reconciliation_bridge_table(
+                        metric_rows,
+                        peer_adjustments_for_company,
+                        peer_metric,
+                        peer_periods,
+                    )
+                    source_url = clean_text(metric_rows.sort_values(["fiscal_year", "fiscal_quarter"]).iloc[-1].get("source_url"))
+                    company_name = clean_text(metric_rows.iloc[0].get("company_name")) or peer_label
+                    render_bridge_table(
+                        bridge,
+                        f"{company_name} ({peer_label})",
+                        f"{selected_family} | issuer label: {peer_metric}",
+                        source_url,
+                    )
+
 
 with tab_sources:
     st.subheader("Fiscal-quarter and 8-K coverage")
