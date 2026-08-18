@@ -544,6 +544,25 @@ def chart_frame(trends: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str]:
     return selected[["period", "chart_value"]].set_index("period"), unit_label
 
 
+DELOITTE_CHART_SEQUENCE = [
+    "#86BC25",  # Deloitte Green (primary, always first)
+    "#00A3E0",  # Blue
+    "#282728",  # Dark Gray
+    "#86EB22",  # Neon Green
+    "#A0DCFF",  # Light Blue
+    "#005587",  # Blue Dark
+    "#B7E320",  # Bright Lime
+    "#63C631",  # Green
+]
+
+
+def chart_series_colors(column_count: int) -> list[str]:
+    """Deloitte's brand chart color sequence, one color per series, cycled if needed."""
+    if column_count <= 0:
+        return []
+    return [DELOITTE_CHART_SEQUENCE[index % len(DELOITTE_CHART_SEQUENCE)] for index in range(column_count)]
+
+
 def display_dataframe(
     frame: pd.DataFrame,
     column_config: Optional[dict[str, Any]] = None,
@@ -1876,7 +1895,11 @@ with tab_adjustments:
             )
             if not adjustment_chart.empty:
                 st.markdown("#### Adjustment bridge trend")
-                st.bar_chart(adjustment_chart, use_container_width=True, color="#86BC25")
+                st.bar_chart(
+                    adjustment_chart,
+                    use_container_width=True,
+                    color=chart_series_colors(len(adjustment_chart.columns)),
+                )
                 st.caption(
                     f"Chart unit: {adjustment_chart_unit}. Up to the eight largest categories by absolute value are shown. Positive and negative bars preserve the issuer's bridge direction."
                 )
