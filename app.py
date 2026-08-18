@@ -54,49 +54,129 @@ st.set_page_config(
 )
 
 CUSTOM_CSS = """
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
-  --app-blue: #1f4e78;
-  --app-teal: #157a6e;
-  --app-gold: #b7791f;
-  --app-border: rgba(128, 128, 128, 0.25);
+  --dl-green: #86BC25;
+  --dl-green-dark: #6B991E;
+  --dl-neon-green: #86EB22;
+  --dl-blue: #00A3E0;
+  --dl-blue-dark: #005587;
+  --dl-dark-gray: #282728;
+  --dl-text-secondary: #5A5A5A;
+  --dl-border: #E2E2E2;
+  --dl-bg-page: #FAFAFA;
+  --dl-bg-card: #FFFFFF;
+  --dl-amber: #E8A317;
+  --dl-red: #DA291C;
+  --app-border: var(--dl-border);
 }
+
+html, body, [class*="css"] {
+  font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.stApp {
+  background: var(--dl-bg-page);
+}
+
 .block-container {
   max-width: 1500px;
-  padding-top: 1.35rem;
+  padding-top: 0.9rem;
   padding-bottom: 3rem;
 }
+
+/* Signature Deloitte green top rule across the whole app */
+.block-container::before {
+  content: "";
+  display: block;
+  height: 4px;
+  border-radius: 4px;
+  margin-bottom: 1.1rem;
+  background: linear-gradient(90deg, var(--dl-green), var(--dl-neon-green) 55%, var(--dl-blue));
+}
+
 [data-testid="stSidebar"] {
   min-width: 310px;
+  background: var(--dl-bg-card);
+  border-right: 1px solid var(--dl-border);
+}
+[data-testid="stSidebar"] > div:first-child {
+  border-top: 4px solid var(--dl-green);
+}
+
+h1, h2, h3, h4 {
+  color: var(--dl-dark-gray);
+  font-weight: 700;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: 0.15rem;
+}
+.app-header .app-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: conic-gradient(from 210deg, var(--dl-green), var(--dl-neon-green), var(--dl-blue), var(--dl-green));
+  position: relative;
+}
+.app-header .app-mark::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border-radius: 50%;
+  background: var(--dl-bg-page);
 }
 .app-kicker {
-  color: #3b82f6;
+  color: var(--dl-green-dark);
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.09em;
   text-transform: uppercase;
   margin-bottom: 0.15rem;
 }
-.source-rule {
-  border: 1px solid rgba(31, 78, 120, 0.35);
-  border-left: 5px solid var(--app-blue);
-  border-radius: 12px;
-  padding: 0.9rem 1rem;
-  background: rgba(31, 78, 120, 0.07);
-  margin: 0.6rem 0 1.15rem 0;
+.app-title {
+  font-size: 1.65rem;
+  font-weight: 700;
+  color: var(--dl-dark-gray);
+  line-height: 1.2;
+  margin: 0;
 }
+.app-title .accent {
+  font-style: italic;
+  color: var(--dl-green-dark);
+}
+
+.source-rule {
+  border: 1px solid rgba(0, 163, 224, 0.28);
+  border-left: 5px solid var(--dl-blue);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  background: rgba(0, 163, 224, 0.06);
+  margin: 0.6rem 0 1.15rem 0;
+  color: var(--dl-dark-gray);
+  font-size: 0.92rem;
+}
+
 .info-card {
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
+  border: 1px solid var(--dl-border);
+  border-top: 3px solid var(--dl-green);
+  border-radius: 10px;
   padding: 0.9rem 1rem;
   min-height: 108px;
-  background: rgba(128, 128, 128, 0.035);
+  background: var(--dl-bg-card);
+  box-shadow: 0 1px 2px rgba(40, 39, 40, 0.04);
 }
 .info-label {
   font-size: 0.76rem;
-  opacity: 0.68;
+  color: var(--dl-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.045em;
+  font-weight: 600;
 }
 .info-value {
   font-size: 1.25rem;
@@ -104,60 +184,71 @@ CUSTOM_CSS = """
   line-height: 1.2;
   margin-top: 0.25rem;
   overflow-wrap: anywhere;
+  color: var(--dl-dark-gray);
 }
 .info-note {
   font-size: 0.78rem;
-  opacity: 0.72;
+  color: var(--dl-text-secondary);
   margin-top: 0.35rem;
 }
+
 .recon-card {
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
+  border: 1px solid var(--dl-border);
+  border-left: 3px solid var(--dl-blue);
+  border-radius: 10px;
   padding: 0.8rem 0.9rem;
   min-height: 102px;
-  background: rgba(128, 128, 128, 0.025);
+  background: var(--dl-bg-card);
+  box-shadow: 0 1px 2px rgba(40, 39, 40, 0.04);
 }
 .recon-card .label {
   font-size: 0.76rem;
-  opacity: 0.68;
+  color: var(--dl-text-secondary);
   text-transform: uppercase;
+  font-weight: 600;
 }
 .recon-card .value {
   font-size: 1.14rem;
   font-weight: 700;
   margin-top: 0.25rem;
+  color: var(--dl-dark-gray);
 }
+
 .small-note {
   font-size: 0.83rem;
-  opacity: 0.72;
+  color: var(--dl-text-secondary);
 }
 .success-note {
-  border-left: 4px solid var(--app-teal);
+  border-left: 4px solid var(--dl-green);
   padding: 0.55rem 0.8rem;
-  background: rgba(21, 122, 110, 0.07);
+  background: rgba(134, 188, 37, 0.08);
   border-radius: 8px;
+  color: var(--dl-dark-gray);
 }
 .warning-note {
-  border-left: 4px solid var(--app-gold);
+  border-left: 4px solid var(--dl-amber);
   padding: 0.55rem 0.8rem;
-  background: rgba(183, 121, 31, 0.08);
+  background: rgba(232, 163, 23, 0.08);
   border-radius: 8px;
+  color: var(--dl-dark-gray);
 }
+
 .bridge-wrap {
   overflow-x: auto;
   margin: 0.6rem 0 1.2rem 0;
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
+  border: 1px solid var(--dl-border);
+  border-radius: 10px;
 }
 .bridge-table {
   width: 100%;
   min-width: 620px;
   border-collapse: collapse;
   font-size: 0.94rem;
+  background: var(--dl-bg-card);
 }
 .bridge-table th, .bridge-table td {
   padding: 0.58rem 0.72rem;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.26);
+  border-bottom: 1px solid var(--dl-border);
   text-align: right;
   white-space: nowrap;
 }
@@ -167,20 +258,23 @@ CUSTOM_CSS = """
   min-width: 300px;
 }
 .bridge-table thead tr.company-head th {
-  background: #101418;
+  background: var(--dl-dark-gray);
   color: #ffffff;
   font-size: 1.02rem;
   border-bottom: none;
 }
 .bridge-table thead tr.period-head th {
-  background: #70ad47;
+  background: var(--dl-green);
   color: #ffffff;
   font-weight: 700;
 }
+.bridge-table tr:nth-child(even) td {
+  background: #F5F5F5;
+}
 .bridge-table tr.row-gaap td, .bridge-table tr.row-non-gaap td {
-  background: rgba(128, 128, 128, 0.20);
+  background: #EAEAEA;
   font-weight: 700;
-  border-top: 2px solid rgba(20, 20, 20, 0.7);
+  border-top: 2px solid var(--dl-dark-gray);
 }
 .bridge-table tr.row-adjustment td:first-child {
   padding-left: 1.4rem;
@@ -188,14 +282,40 @@ CUSTOM_CSS = """
 .matrix-dot {
   font-size: 1.1rem;
   line-height: 1;
+  color: var(--dl-green-dark);
 }
 .peer-note {
-  border-left: 4px solid #70ad47;
-  background: rgba(112, 173, 71, 0.09);
+  border-left: 4px solid var(--dl-green);
+  background: rgba(134, 188, 37, 0.09);
   border-radius: 8px;
   padding: 0.65rem 0.85rem;
   margin: 0.55rem 0 1rem 0;
+  color: var(--dl-dark-gray);
 }
+
+/* Tabs: green underline on the active tab instead of Streamlit's red default */
+.stTabs [data-baseweb="tab-list"] {
+  gap: 4px;
+  border-bottom: 1px solid var(--dl-border);
+}
+.stTabs [aria-selected="true"] {
+  color: var(--dl-green-dark) !important;
+  font-weight: 700;
+}
+.stTabs [data-baseweb="tab-highlight"] {
+  background-color: var(--dl-green) !important;
+}
+
+/* Dataframes / tables */
+[data-testid="stDataFrame"] {
+  border: 1px solid var(--dl-border);
+  border-radius: 8px;
+}
+
+hr, [data-testid="stDivider"] {
+  border-color: var(--dl-border) !important;
+}
+
 @media (max-width: 760px) {
   .block-container {
     padding-left: 0.8rem;
@@ -205,6 +325,7 @@ CUSTOM_CSS = """
   h1 { font-size: 1.75rem !important; }
   h2 { font-size: 1.35rem !important; }
   .info-card { min-height: 90px; }
+  .app-title { font-size: 1.3rem; }
 }
 </style>
 """
@@ -1065,8 +1186,16 @@ def peer_company_count_frame(matrix: pd.DataFrame, column_label: str) -> pd.Data
     return pd.DataFrame(rows).sort_values(column_label, ascending=True).set_index("Peer")
 
 
-st.markdown('<div class="app-kicker">Evidence-first SEC filing analysis</div>', unsafe_allow_html=True)
-st.title(APP_NAME)
+st.markdown(
+    f"""
+    <div class="app-kicker">Evidence-first SEC filing analysis</div>
+    <div class="app-header">
+      <div class="app-mark"></div>
+      <h1 class="app-title">SEC Non-GAAP <span class="accent">Reconciliation</span> &amp; Peer Benchmarking</h1>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 st.caption(
     "Structured GAAP-to-non-GAAP reconciliations, adjustment bridges, and additional non-GAAP callouts by issuer fiscal quarter."
 )
@@ -1554,7 +1683,7 @@ with tab_metrics:
             selected_metric = st.selectbox("Select a metric", options=metric_options, key="metric_trend_selector")
             trend_chart, chart_unit = chart_frame(trends, selected_metric)
             if not trend_chart.empty:
-                st.line_chart(trend_chart, use_container_width=True)
+                st.line_chart(trend_chart, use_container_width=True, color="#86BC25")
                 st.caption(f"Chart unit: {chart_unit}. The chart follows issuer fiscal-quarter order, not calendar-quarter order.")
 
 with tab_details:
@@ -1746,7 +1875,7 @@ with tab_adjustments:
             )
             if not adjustment_chart.empty:
                 st.markdown("#### Adjustment bridge trend")
-                st.bar_chart(adjustment_chart, use_container_width=True)
+                st.bar_chart(adjustment_chart, use_container_width=True, color="#86BC25")
                 st.caption(
                     f"Chart unit: {adjustment_chart_unit}. Up to the eight largest categories by absolute value are shown. Positive and negative bars preserve the issuer's bridge direction."
                 )
@@ -2166,7 +2295,7 @@ with tab_peer:
                     measure_matrix_all, "Number of non-GAAP measures"
                 )
                 st.markdown("##### Peers by number of non-GAAP measure disclosures")
-                st.bar_chart(measure_counts, use_container_width=True)
+                st.bar_chart(measure_counts, use_container_width=True, color="#86BC25")
 
         with peer_adjustment_tab:
             peer_adjustments = peer_analysis.get("adjustment_history", pd.DataFrame())
@@ -2201,7 +2330,7 @@ with tab_peer:
                         adjustment_matrix_peer_all, "Number of adjustment types"
                     )
                     st.markdown("##### Peers by number of non-GAAP adjustment types")
-                    st.bar_chart(adjustment_counts, use_container_width=True)
+                    st.bar_chart(adjustment_counts, use_container_width=True, color="#86BC25")
                 st.caption(
                     "A dot means the adjustment type appeared in at least one parsed reconciliation for that company. "
                     "Counts are disclosure presence, not additive amounts."
@@ -2232,7 +2361,7 @@ with tab_peer:
                 if not kpi_matrix.empty:
                     kpi_counts = peer_company_count_frame(kpi_matrix_all, "Number of KPIs")
                     st.markdown("##### Peers by number of KPI disclosures")
-                    st.bar_chart(kpi_counts, use_container_width=True)
+                    st.bar_chart(kpi_counts, use_container_width=True, color="#86BC25")
                 with st.expander("KPI source context", expanded=False):
                     kpi_columns = [
                         column
