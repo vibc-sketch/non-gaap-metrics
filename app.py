@@ -54,8 +54,9 @@ st.set_page_config(
 )
 
 CUSTOM_CSS = """
-<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap');
+
 :root {
   --dl-green: #86BC25;
   --dl-green-dark: #6B991E;
@@ -329,7 +330,7 @@ hr, [data-testid="stDivider"] {
 }
 </style>
 """
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+st.html(CUSTOM_CSS)
 
 if ENGINE_API_MISSING:
     loaded_path = getattr(ng, "__file__", "unknown module path")
