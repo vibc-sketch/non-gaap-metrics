@@ -1835,12 +1835,20 @@ def build_pairs_from_rows(
             if gaap_index is None:
                 continue
             gaap_row = section_rows[gaap_index]
-            unit = infer_unit(ng_row["label"], ng_row["value_meta"], table_meta["scale"])
+            # Each endpoint's unit is inferred from ITS OWN label/value metadata, not
+            # borrowed from the other side. A reconciliation to a margin/rate metric
+            # (e.g. "Free cash flow margin", "Adjusted EBITDA margin") has a dollar
+            # GAAP anchor (net income, operating cash flow) but a percent non-GAAP
+            # endpoint -- treating them as one unit mislabels the GAAP dollar value
+            # as a percentage.
+            gaap_unit = infer_unit(gaap_row["label"], gaap_row["value_meta"], table_meta["scale"])
+            non_gaap_unit = infer_unit(ng_row["label"], ng_row["value_meta"], table_meta["scale"])
             gaap_value = gaap_row["value"]
             non_gaap_value = ng_row["value"]
+            mixed_units = gaap_unit != non_gaap_unit
             adjustment_value = (
                 non_gaap_value - gaap_value
-                if gaap_value is not None and non_gaap_value is not None
+                if gaap_value is not None and non_gaap_value is not None and not mixed_units
                 else None
             )
             metric_name = canonical_metric_name(ng_row["label"], section)
@@ -1852,13 +1860,16 @@ def build_pairs_from_rows(
                 "section": section,
                 "gaap_label": gaap_row["label"],
                 "gaap_value": gaap_value,
-                "gaap_display": format_value(gaap_value, unit, table_meta["scale"]),
+                "gaap_display": format_value(gaap_value, gaap_unit, table_meta["scale"]),
                 "non_gaap_label": ng_row["label"],
                 "non_gaap_value": non_gaap_value,
-                "non_gaap_display": format_value(non_gaap_value, unit, table_meta["scale"]),
+                "non_gaap_display": format_value(non_gaap_value, non_gaap_unit, table_meta["scale"]),
                 "adjustment_value": adjustment_value,
-                "adjustment_display": format_value(adjustment_value, unit, table_meta["scale"]),
-                "unit": unit,
+                "adjustment_display": (
+                    "n/m" if mixed_units else format_value(adjustment_value, gaap_unit, table_meta["scale"])
+                ),
+                "unit": non_gaap_unit,
+                "gaap_unit": gaap_unit,
                 "scale": table_meta["scale"],
                 "source_role": table_meta["source_role"],
                 "source_document": table_meta["source_document"],
@@ -1895,7 +1906,14 @@ def build_pairs_from_rows(
                 elif re.search(r"per share|\beps\b", adjustment_label_lower):
                     adjustment_unit = "usd_per_share"
                 else:
-                    adjustment_unit = unit
+                    # Individual bridge lines (SBC, D&A, restructuring, capex, etc.)
+                    # are conventionally denominated in the GAAP anchor's unit even
+                    # when the final non-GAAP endpoint is a margin/rate/per-share
+                    # figure -- the ratio is typically a separate derived row with
+                    # its own explicit "%" marker (handled above), not the bridge
+                    # itself. Falling back to the GAAP unit (not the endpoint unit)
+                    # avoids mislabeling dollar reconciling items as percentages.
+                    adjustment_unit = gaap_unit
                 adjustments.append(
                     {
                         "pair_id": pair_id,
