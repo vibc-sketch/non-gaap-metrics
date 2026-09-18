@@ -35,3 +35,4 @@ def test_apple_theme_declares_forced_light_contrast_for_core_surfaces() -> None:
     assert '[data-testid="stSidebarCollapsedControl"]' in source
     assert '[data-testid="stSidebarCollapseButton"]' in source
     assert '[data-testid="stHeader"] svg' in source
+    assert 'svg path[fill="none"]' in source

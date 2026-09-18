@@ -28,7 +28,7 @@ SEC_ALLOWED_HOSTS = {"sec.gov", "www.sec.gov", "data.sec.gov"}
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
 DEFAULT_CACHE_BYTES = 160 * 1024 * 1024
-APP_VERSION = "6.7.0"
+APP_VERSION = "6.8.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {

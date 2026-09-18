@@ -943,15 +943,36 @@ html { color-scheme: light !important; }
 }
 [data-testid="stHeader"] button *,
 [data-testid="stHeader"] [data-testid="stBaseButton-header"] *,
-[data-testid="stHeader"] svg,
-[data-testid="stHeader"] svg *,
 [data-testid="stHeader"] [data-testid="stIconMaterial"],
-[data-testid="stToolbar"] *,
-[data-testid="stMainMenu"] * {
+[data-testid="stToolbar"] > *,
+[data-testid="stMainMenu"] > * {
+  color: #1D1D1F !important;
+  opacity: 1 !important;
+}
+[data-testid="stHeader"] svg {
   color: #1D1D1F !important;
   fill: currentColor !important;
-  stroke: currentColor !important;
+  stroke: none !important;
   opacity: 1 !important;
+}
+/* Material SVGs include a transparent sizing path. Preserve it so an icon does
+   not become a filled square while still forcing the visible glyph to graphite. */
+[data-testid="stHeader"] svg path[fill="none"] {
+  fill: none !important;
+  stroke: none !important;
+}
+[data-testid="stHeader"] svg path:not([fill="none"]),
+[data-testid="stHeader"] svg circle,
+[data-testid="stHeader"] svg rect:not([fill="none"]),
+[data-testid="stHeader"] svg polygon {
+  fill: #1D1D1F !important;
+  stroke: none !important;
+}
+[data-testid="stHeader"] svg path[fill="none"][stroke],
+[data-testid="stHeader"] svg line,
+[data-testid="stHeader"] svg polyline {
+  fill: none !important;
+  stroke: #1D1D1F !important;
 }
 [data-testid="stToolbar"],
 [data-testid="stMainMenu"],
