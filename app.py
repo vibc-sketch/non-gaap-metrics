@@ -1070,6 +1070,7 @@ def source_audit_view(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "period",
         "document_role",
+        "discovery_method",
         "content_type",
         "has_reconciliation",
         "document",
@@ -1088,6 +1089,7 @@ def source_audit_view(frame: pd.DataFrame) -> pd.DataFrame:
         columns={
             "period": "Fiscal period",
             "document_role": "Document role",
+            "discovery_method": "Discovery path",
             "content_type": "Format",
             "has_reconciliation": "Reconciliation found",
             "document": "Document",

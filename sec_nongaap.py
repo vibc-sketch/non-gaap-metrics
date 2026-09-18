@@ -665,6 +665,7 @@ def parse_filing_index(index_html: str, base_url: str) -> list[dict[str, Any]]:
                     "size": size,
                     "url": url,
                     "role": classify_document_role(document, description, doc_type),
+                    "discovery_method": "Filing index",
                 }
             )
 
@@ -698,8 +699,59 @@ def parse_filing_index(index_html: str, base_url: str) -> list[dict[str, Any]]:
                 "size": "",
                 "url": url,
                 "role": classify_document_role(document, description, doc_type),
+                "discovery_method": "Filing index",
             }
         )
+    return documents
+
+
+def discover_primary_document_links(primary_html: str, base_url: str) -> list[dict[str, Any]]:
+    """Find SEC-hosted PDF/HTML press-release links embedded in a primary 8-K.
+
+    Some issuers reference a release from the 8-K narrative rather than presenting
+    it cleanly in the filing-index exhibit table.  The app treats these as a
+    supplemental discovery path while preserving the SEC-host-only source rule.
+    """
+    soup = BeautifulSoup(primary_html or "", "html.parser")
+    documents: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for sequence, link in enumerate(soup.find_all("a", href=True), start=1):
+        href = clean_space(link.get("href"))
+        if href.startswith("/ixviewer/doc/action") or href.startswith("/ix?doc="):
+            match = re.search(r"(?:doc=)([^&]+)", href)
+            href = match.group(1) if match else href
+        url = urljoin(base_url, href)
+        if url in seen or not is_sec_resource_url(url):
+            continue
+        extension = PurePosixPath(urlparse(url).path).suffix.lower()
+        if extension not in {".htm", ".html", ".txt", ".pdf", ""}:
+            continue
+        anchor_text = clean_space(link.get_text(" ", strip=True))
+        context_container = link.find_parent(["p", "li", "td", "div"])
+        parent_text = clean_space(context_container.get_text(" ", strip=True)) if context_container else ""
+        descriptor = clean_space(" ".join([anchor_text, parent_text, url]))
+        if not re.search(
+            r"press release|news release|earnings|financial results|results release|ex[- ]?99|exhibit\s+99|99\.\d",
+            descriptor,
+            re.I,
+        ):
+            continue
+        document = PurePosixPath(urlparse(url).path).name or anchor_text or f"linked-document-{sequence}"
+        doc_type_match = re.search(r"EX[- ]?99(?:\.\d+)?|EXHIBIT\s+99(?:\.\d+)?", descriptor, re.I)
+        doc_type = doc_type_match.group(0).upper().replace(" ", "-") if doc_type_match else "EX-99 linked"
+        documents.append(
+            {
+                "sequence": f"link-{sequence:03d}",
+                "description": descriptor[:500],
+                "document": document,
+                "doc_type": doc_type,
+                "size": "",
+                "url": url,
+                "role": classify_document_role(document, descriptor, doc_type),
+                "discovery_method": "8-K primary link",
+            }
+        )
+        seen.add(url)
     return documents
 
 
@@ -725,7 +777,14 @@ def relevant_exhibits(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "Other EX-99 exhibit": 3,
         "Other": 4,
     }
-    return sorted(candidates, key=lambda item: (role_rank.get(item.get("role") or "Other", 9), item.get("sequence") or ""))
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        url = candidate.get("url") or ""
+        if url and url not in seen:
+            unique.append(candidate)
+            seen.add(url)
+    return sorted(unique, key=lambda item: (role_rank.get(item.get("role") or "Other", 9), item.get("sequence") or ""))
 
 
 def html_plain_text(document_html: str) -> str:
@@ -818,8 +877,10 @@ def match_earnings_8k(
         if progress:
             progress(f"Checking 8-K filed {filing_date or ''} for the earnings release...")
         try:
-            primary_text = html_plain_text(client.get_text(primary_url))
+            primary_html = client.get_text(primary_url)
+            primary_text = html_plain_text(primary_html)
         except Exception:
+            primary_html = ""
             primary_text = ""
         primary_lower = primary_text.lower()
         if "item 2.02" in primary_lower or "results of operations and financial condition" in primary_lower:
@@ -834,10 +895,14 @@ def match_earnings_8k(
             documents = parse_filing_index(client.get_text(index), index)
         except Exception:
             documents = []
-        exhibits = relevant_exhibits(documents)
+        primary_links = discover_primary_document_links(primary_html, primary_url)
+        exhibits = relevant_exhibits(documents + primary_links)
         if any(item.get("role") == "Press release" for item in exhibits):
             score += 35
             reasons.append("press-release exhibit")
+        if primary_links:
+            score += 8
+            reasons.append("primary-8-K press-release link")
         if any(item.get("role") == "Investor presentation" for item in exhibits):
             score += 12
             reasons.append("presentation exhibit")
@@ -2820,6 +2885,7 @@ def parse_exhibit(
         "description": exhibit.get("description") or "",
         "doc_type": exhibit.get("doc_type") or "",
         "role": exhibit.get("role") or "Other EX-99 exhibit",
+        "discovery_method": exhibit.get("discovery_method") or "Filing index",
         "url": exhibit.get("url") or "",
         "content_type": document_type,
         "has_reconciliation": bool(pairs),
@@ -2934,6 +3000,7 @@ def analyze_company_quarters(
                     "8k_url": matched.get("primary_url"),
                     "8k_index_url": matched.get("index_url"),
                     "document_role": parsed.get("role"),
+                    "discovery_method": parsed.get("discovery_method"),
                     "document": parsed.get("document"),
                     "description": parsed.get("description"),
                     "doc_type": parsed.get("doc_type"),

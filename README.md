@@ -8,6 +8,7 @@ A Streamlit app that searches public-company issuers and extracts non-GAAP metri
 - Resolve issuer metadata from SEC submissions, including SIC and fiscal year end.
 - Inspect 8-K / 8-K-A, 10-K / 10-Q / amendments, and optionally S-1 / S-1-A filings.
 - Find likely earnings press-release exhibits (especially EX-99.x) and parse tables/narrative for common non-GAAP disclosures.
+- Also inspect SEC-hosted PDF/HTML press-release links embedded in the primary earnings 8-K when an exhibit-table entry is incomplete or absent.
 - Normalize records to issuer fiscal year / fiscal quarter using SEC filing `fy` / `fp` metadata rather than assuming calendar quarters.
 - Preserve issuer-provided definition and calculation evidence when an exhibit explicitly describes a non-GAAP measure.
 - Build source-linked reconciliation bridges, adjustment histories, peer disclosure matrices, and Excel/CSV exports.

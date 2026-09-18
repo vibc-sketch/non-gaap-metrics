@@ -61,6 +61,26 @@ def test_relevant_exhibits_accepts_only_sec_hosted_documents() -> None:
     assert [item["url"] for item in exhibits] == [SEC_SOURCE["url"]]
 
 
+def test_primary_8k_link_discovery_finds_only_sec_press_release_links() -> None:
+    primary_html = """
+    <html><body>
+      <p>Our <a href="earnings-release.pdf">quarterly earnings press release</a> is furnished as Exhibit 99.1.</p>
+      <a href="https://untrusted.example/earnings-release.pdf">external release</a>
+      <a href="governance.htm">corporate governance</a>
+    </body></html>
+    """
+
+    documents = ng.discover_primary_document_links(
+        primary_html,
+        "https://www.sec.gov/Archives/edgar/data/1/1/primary8k.htm",
+    )
+
+    assert len(documents) == 1
+    assert documents[0]["url"].endswith("/earnings-release.pdf")
+    assert documents[0]["role"] == "Press release"
+    assert documents[0]["discovery_method"] == "8-K primary link"
+
+
 def test_sec_client_rejects_non_sec_resource_before_request() -> None:
     client = ng.SecClient("research@example.com")
 
