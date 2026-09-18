@@ -279,3 +279,47 @@ def test_peer_adjustment_trend_matrix_tracks_disclosure_presence_by_period() -> 
         "FY2026 Q2": {"AAPL": 1, "MSFT": 0},
         "FY2026 Q3": {"AAPL": 1, "MSFT": 1},
     }
+
+
+def test_tieout_uses_issuer_subtotal_without_double_counting_it() -> None:
+    reconciliations = pd.DataFrame(
+        [
+            {
+                "pair_id": "pair-1",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q3",
+                "period": "FY2026 Q3",
+                "metric": "Adjusted EBITDA",
+                "gaap_display": "$100.0",
+                "adjustment_display": "$10.0",
+                "adjustment_value": 10.0,
+                "non_gaap_display": "$110.0",
+                "unit": "usd",
+                "scale": "millions",
+            }
+        ]
+    )
+    adjustments = pd.DataFrame(
+        [
+            {
+                "pair_id": "pair-1",
+                "adjustment_label": "Stock-based compensation",
+                "adjustment_value": 4.0,
+                "adjustment_category": "Stock-based and equity compensation",
+                "is_subtotal": False,
+            },
+            {
+                "pair_id": "pair-1",
+                "adjustment_label": "Total adjustments",
+                "adjustment_value": 10.0,
+                "adjustment_category": "Other issuer-specific adjustment",
+                "is_subtotal": True,
+            },
+        ]
+    )
+
+    tieouts = ng.build_adjustment_tieouts(reconciliations, adjustments)
+
+    assert tieouts.iloc[0]["tie_out_status"] == "Issuer subtotal confirms endpoint"
+    assert tieouts.iloc[0]["detail_line_count"] == 1
+    assert tieouts.iloc[0]["issuer_subtotal_display"] == "$10.0M"

@@ -28,7 +28,7 @@ SEC_ALLOWED_HOSTS = {"sec.gov", "www.sec.gov", "data.sec.gov"}
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
 DEFAULT_CACHE_BYTES = 160 * 1024 * 1024
-APP_VERSION = "6.5.0"
+APP_VERSION = "6.6.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -1697,7 +1697,7 @@ def build_adjustment_tieouts(
     """Compare parsed adjustment lines with non-GAAP minus GAAP for each bridge."""
     columns = [
         "pair_id", "fiscal_year", "fiscal_quarter", "period", "metric", "gaap_display",
-        "expected_adjustment_display", "parsed_adjustment_display", "variance_display",
+        "expected_adjustment_display", "parsed_adjustment_display", "issuer_subtotal_display", "variance_display",
         "non_gaap_display", "detail_line_count", "category_count", "tie_out_status",
         "tie_out_note", "source_role", "source_page", "source_url",
     ]
@@ -1714,7 +1714,12 @@ def build_adjustment_tieouts(
                 [column for column in ["pair_id", "adjustment_label", "adjustment_value", "unit", "scale", "source_url", "source_page"] if column in pair_detail.columns],
                 keep="first",
             )
-        numeric = pd.to_numeric(pair_detail.get("adjustment_value", pd.Series(dtype=float)), errors="coerce").dropna()
+        detail_rows = pair_detail.copy()
+        subtotal_rows = pd.DataFrame()
+        if not pair_detail.empty and "is_subtotal" in pair_detail.columns:
+            subtotal_rows = pair_detail[pair_detail["is_subtotal"].fillna(False).astype(bool)].copy()
+            detail_rows = pair_detail[~pair_detail["is_subtotal"].fillna(False).astype(bool)].copy()
+        numeric = pd.to_numeric(detail_rows.get("adjustment_value", pd.Series(dtype=float)), errors="coerce").dropna()
         parsed_sum = float(numeric.sum()) if not numeric.empty else None
         try:
             expected = float(pair.get("adjustment_value"))
@@ -1723,7 +1728,19 @@ def build_adjustment_tieouts(
         unit = clean_space(pair.get("unit"))
         scale = clean_space(pair.get("scale")) or "units"
         variance = parsed_sum - expected if parsed_sum is not None and expected is not None else None
-        if pair_detail.empty:
+        subtotal_values = pd.to_numeric(subtotal_rows.get("adjustment_value", pd.Series(dtype=float)), errors="coerce").dropna()
+        matching_subtotal = next(
+            (
+                float(value)
+                for value in subtotal_values.tolist()
+                if expected is not None and abs(float(value) - expected) <= _tie_out_tolerance(expected, unit)
+            ),
+            None,
+        )
+        if detail_rows.empty and matching_subtotal is not None:
+            status = "Issuer subtotal confirms endpoint"
+            note = "The issuer-reported subtotal agrees with non-GAAP minus GAAP, but individual adjustment lines were not parsed."
+        elif detail_rows.empty:
             status = "No line-item detail"
             note = "The GAAP and non-GAAP endpoints were parsed, but individual reconciling rows were not."
         elif expected is None:
@@ -1732,14 +1749,17 @@ def build_adjustment_tieouts(
         elif variance is not None and abs(variance) <= _tie_out_tolerance(expected, unit):
             status = "Ties within rounding"
             note = "The parsed line items agree with non-GAAP minus GAAP within the rounding threshold."
+        elif matching_subtotal is not None:
+            status = "Issuer subtotal confirms endpoint"
+            note = "The parsed individual lines do not fully tie, but the issuer-reported subtotal agrees with the endpoint difference."
         else:
-            status = "Review difference"
-            note = "Parsed line items do not fully agree with the endpoint difference; review for subtotals, omitted rows, or table parsing issues."
+            status = "Needs source review"
+            note = "Parsed line items do not fully agree with the endpoint difference and no matching issuer subtotal was parsed; review the source table for omitted rows or parsing issues."
         categories = (
-            pair_detail["adjustment_category"].nunique()
-            if not pair_detail.empty and "adjustment_category" in pair_detail.columns
-            else pair_detail.get("adjustment_label", pd.Series(dtype=str)).map(classify_adjustment_label).nunique()
-            if not pair_detail.empty
+            detail_rows["adjustment_category"].nunique()
+            if not detail_rows.empty and "adjustment_category" in detail_rows.columns
+            else detail_rows.get("adjustment_label", pd.Series(dtype=str)).map(classify_adjustment_label).nunique()
+            if not detail_rows.empty
             else 0
         )
         rows.append(
@@ -1752,9 +1772,10 @@ def build_adjustment_tieouts(
                 "gaap_display": pair.get("gaap_display"),
                 "expected_adjustment_display": pair.get("adjustment_display"),
                 "parsed_adjustment_display": format_value(parsed_sum, unit, scale) if parsed_sum is not None else "—",
+                "issuer_subtotal_display": format_value(matching_subtotal, unit, scale) if matching_subtotal is not None else "—",
                 "variance_display": format_value(variance, unit, scale) if variance is not None else "—",
                 "non_gaap_display": pair.get("non_gaap_display"),
-                "detail_line_count": int(len(pair_detail)),
+                "detail_line_count": int(len(detail_rows)),
                 "category_count": int(categories),
                 "tie_out_status": status,
                 "tie_out_note": note,
@@ -1794,6 +1815,8 @@ def make_adjustment_value_matrix(adjustment_history: pd.DataFrame, metric: str) 
     if adjustment_history is None or adjustment_history.empty or not clean_space(metric):
         return pd.DataFrame()
     data = adjustment_history[adjustment_history["metric"].astype(str).eq(str(metric))].copy()
+    if "is_subtotal" in data.columns:
+        data = data[~data["is_subtotal"].fillna(False).astype(bool)].copy()
     if data.empty:
         return pd.DataFrame()
     records: list[dict[str, Any]] = []
@@ -1825,6 +1848,10 @@ def make_adjustment_presence_matrix(adjustment_history: pd.DataFrame) -> pd.Data
     if adjustment_history is None or adjustment_history.empty:
         return pd.DataFrame()
     data = adjustment_history.copy()
+    if "is_subtotal" in data.columns:
+        data = data[~data["is_subtotal"].fillna(False).astype(bool)].copy()
+    if data.empty:
+        return pd.DataFrame()
     records: list[dict[str, Any]] = []
     for (category, period), group in data.groupby(["adjustment_category", "period"], dropna=False):
         metric_count = int(group["metric"].nunique())
@@ -1868,6 +1895,12 @@ def make_adjustment_metric_matrix(adjustment_history: pd.DataFrame) -> pd.DataFr
 
 def adjustment_category_summary(adjustment_history: pd.DataFrame) -> pd.DataFrame:
     if adjustment_history is None or adjustment_history.empty:
+        return pd.DataFrame()
+    if "is_subtotal" in adjustment_history.columns:
+        adjustment_history = adjustment_history[
+            ~adjustment_history["is_subtotal"].fillna(False).astype(bool)
+        ].copy()
+    if adjustment_history.empty:
         return pd.DataFrame()
     records: list[dict[str, Any]] = []
     for category, group in adjustment_history.groupby("adjustment_category", dropna=False):
@@ -2027,6 +2060,62 @@ def _find_gaap_match(rows: list[dict[str, Any]], non_gaap_index: int) -> Optiona
     return best_index
 
 
+def _adjustment_row_unit(adjustment_row: dict[str, Any], bridge_unit: str) -> str:
+    """Infer an individual adjustment's unit while respecting the bridge anchor."""
+    adjustment_meta = adjustment_row["value_meta"]
+    adjustment_label_lower = clean_space(adjustment_row.get("label")).lower()
+    if adjustment_meta.get("currency"):
+        return "usd"
+    if adjustment_meta.get("suffix") == "%" or "%" in adjustment_label_lower or "percentage" in adjustment_label_lower:
+        return "percent"
+    if adjustment_meta.get("suffix") == "bps" or re.search(r"\bbps\b|basis points?", adjustment_label_lower):
+        return "bps"
+    if re.search(r"per share|\beps\b", adjustment_label_lower):
+        return "usd_per_share"
+    return bridge_unit
+
+
+def _endpoint_matched_adjustment_rows(
+    detail_rows: list[dict[str, Any]],
+    expected: Optional[float],
+    unit: str,
+) -> list[dict[str, Any]]:
+    """Keep an exact endpoint-matched subset when a broad table scan overcaptures rows.
+
+    Some issuer tables place several reconciliations next to each other. When the
+    full in-between span does not tie but a smaller ordered subset does within the
+    regular rounding threshold, retaining that subset is more source-faithful than
+    presenting all intervening rows as one reconciliation.
+    """
+    if expected is None or len(detail_rows) < 2 or len(detail_rows) > 15:
+        return detail_rows
+    candidates: list[tuple[int, float]] = []
+    for index, row in enumerate(detail_rows):
+        try:
+            candidates.append((index, float(row.get("value"))))
+        except (TypeError, ValueError):
+            continue
+    if len(candidates) < 2:
+        return detail_rows
+    full_sum = sum(value for _, value in candidates)
+    full_difference = abs(full_sum - expected)
+    tolerance = _tie_out_tolerance(expected, unit)
+    best_indices: list[int] = []
+    best_difference = full_difference
+    for mask in range(1, 1 << len(candidates)):
+        selected_indices = [candidates[position][0] for position in range(len(candidates)) if mask & (1 << position)]
+        selected_sum = sum(candidates[position][1] for position in range(len(candidates)) if mask & (1 << position))
+        difference = abs(selected_sum - expected)
+        if difference < best_difference - 1e-12 or (
+            abs(difference - best_difference) <= 1e-12 and best_indices and len(selected_indices) < len(best_indices)
+        ):
+            best_difference = difference
+            best_indices = selected_indices
+    if best_indices and best_difference <= tolerance and best_difference + tolerance < full_difference:
+        return [row for index, row in enumerate(detail_rows) if index in set(best_indices)]
+    return detail_rows
+
+
 def build_pairs_from_rows(
     rows: list[dict[str, Any]],
     table_meta: dict[str, Any],
@@ -2056,9 +2145,14 @@ def build_pairs_from_rows(
             gaap_value = gaap_row["value"]
             non_gaap_value = ng_row["value"]
             mixed_units = gaap_unit != non_gaap_unit
+            # A dollar GAAP anchor paired with a percentage endpoint usually means
+            # the parser crossed into a nearby margin/rate table. Suppress this
+            # non-comparable pair rather than exporting a misleading bridge.
+            if mixed_units:
+                continue
             adjustment_value = (
                 non_gaap_value - gaap_value
-                if gaap_value is not None and non_gaap_value is not None and not mixed_units
+                if gaap_value is not None and non_gaap_value is not None
                 else None
             )
             metric_name = canonical_metric_name(ng_row["label"], section)
@@ -2075,9 +2169,7 @@ def build_pairs_from_rows(
                 "non_gaap_value": non_gaap_value,
                 "non_gaap_display": format_value(non_gaap_value, non_gaap_unit, table_meta["scale"]),
                 "adjustment_value": adjustment_value,
-                "adjustment_display": (
-                    "n/m" if mixed_units else format_value(adjustment_value, gaap_unit, table_meta["scale"])
-                ),
+                "adjustment_display": format_value(adjustment_value, gaap_unit, table_meta["scale"]),
                 "unit": non_gaap_unit,
                 "gaap_unit": gaap_unit,
                 "scale": table_meta["scale"],
@@ -2097,8 +2189,16 @@ def build_pairs_from_rows(
             start, end = sorted((gaap_index, ng_index))
             bridge_rows = section_rows[start + 1 : end]
             detail_rows = [row for row in bridge_rows if row.get("kind") == "adjustment"]
+            detail_rows = [
+                row for row in detail_rows if _adjustment_row_unit(row, gaap_unit) == gaap_unit
+            ]
+            detail_rows = _endpoint_matched_adjustment_rows(detail_rows, adjustment_value, gaap_unit)
             subtotal_rows = [row for row in bridge_rows if row.get("kind") == "subtotal"]
-            rows_to_emit = detail_rows if detail_rows else subtotal_rows
+            # Retain an issuer subtotal as audit evidence even when individual lines
+            # exist. Downstream bridge displays omit subtotal rows from the additive
+            # line-item section, while tie-out checks can use them to distinguish a
+            # parser gap from an actual endpoint inconsistency.
+            rows_to_emit = [*detail_rows, *subtotal_rows]
             for adjustment_order, adjustment_row in enumerate(rows_to_emit, start=1):
                 adjustment_meta = adjustment_row["value_meta"]
                 adjustment_label_lower = clean_space(adjustment_row.get("label")).lower()
@@ -2107,23 +2207,7 @@ def build_pairs_from_rows(
                 # inherit the bridge unit unless their own cell or label explicitly
                 # states another unit. This avoids treating dollar gross-margin
                 # adjustments as percentages merely because the label contains "margin".
-                if adjustment_meta.get("currency"):
-                    adjustment_unit = "usd"
-                elif adjustment_meta.get("suffix") == "%" or "%" in adjustment_label_lower or "percentage" in adjustment_label_lower:
-                    adjustment_unit = "percent"
-                elif adjustment_meta.get("suffix") == "bps" or re.search(r"\bbps\b|basis points?", adjustment_label_lower):
-                    adjustment_unit = "bps"
-                elif re.search(r"per share|\beps\b", adjustment_label_lower):
-                    adjustment_unit = "usd_per_share"
-                else:
-                    # Individual bridge lines (SBC, D&A, restructuring, capex, etc.)
-                    # are conventionally denominated in the GAAP anchor's unit even
-                    # when the final non-GAAP endpoint is a margin/rate/per-share
-                    # figure -- the ratio is typically a separate derived row with
-                    # its own explicit "%" marker (handled above), not the bridge
-                    # itself. Falling back to the GAAP unit (not the endpoint unit)
-                    # avoids mislabeling dollar reconciling items as percentages.
-                    adjustment_unit = gaap_unit
+                adjustment_unit = _adjustment_row_unit(adjustment_row, gaap_unit)
                 adjustments.append(
                     {
                         "pair_id": pair_id,
@@ -2846,6 +2930,8 @@ def make_peer_adjustment_comparison_matrix(
         return pd.DataFrame(columns=fixed_columns)
 
     data = adjustments.copy()
+    if "is_subtotal" in data.columns:
+        data = data[~data["is_subtotal"].fillna(False).astype(bool)].copy()
     for column in [company_field, "adjustment_category", "adjustment_label", "adjustment_display", "period"]:
         if column not in data.columns:
             data[column] = ""
@@ -2944,6 +3030,8 @@ def make_peer_adjustment_trend_matrix(
     if not category:
         return pd.DataFrame()
     data = adjustments.copy()
+    if "is_subtotal" in data.columns:
+        data = data[~data["is_subtotal"].fillna(False).astype(bool)].copy()
     data[company_field] = data[company_field].map(clean_space)
     data["adjustment_category"] = data["adjustment_category"].map(clean_space)
     data["period"] = data["period"].map(clean_space)
@@ -3008,11 +3096,16 @@ def make_reconciliation_bridge_table(
         period_adjustments = adjustment_frame[
             adjustment_frame.get("pair_id", pd.Series(dtype=str)).astype(str).eq(pair_id)
         ] if not adjustment_frame.empty and "pair_id" in adjustment_frame.columns else pd.DataFrame()
-        if not period_adjustments.empty:
+        displayed_adjustments = period_adjustments.copy()
+        if not displayed_adjustments.empty and "is_subtotal" in displayed_adjustments.columns:
+            displayed_adjustments = displayed_adjustments[
+                ~displayed_adjustments["is_subtotal"].fillna(False).astype(bool)
+            ].copy()
+        if not displayed_adjustments.empty:
             sort_columns = [column for column in ["adjustment_order", "adjustment_label"] if column in period_adjustments.columns]
             if sort_columns:
-                period_adjustments = period_adjustments.sort_values(sort_columns)
-            for _, adjustment in period_adjustments.iterrows():
+                displayed_adjustments = displayed_adjustments.sort_values(sort_columns)
+            for _, adjustment in displayed_adjustments.iterrows():
                 label = clean_space(adjustment.get("adjustment_label")) or "Adjustment"
                 key = f"ADJ::{label.lower()}"
                 if key not in line_order:
@@ -3047,10 +3140,15 @@ def make_reconciliation_bridge_table(
                     display = clean_space(pair.get("non_gaap_display")) or "—"
                 elif key == "__TOTAL_ADJUSTMENTS__":
                     pair_id = clean_space(pair.get("pair_id"))
+                    pair_adjustments = adjustment_frame[
+                        adjustment_frame.get("pair_id", pd.Series(dtype=str)).astype(str).eq(pair_id)
+                    ] if not adjustment_frame.empty and "pair_id" in adjustment_frame.columns else pd.DataFrame()
+                    if not pair_adjustments.empty and "is_subtotal" in pair_adjustments.columns:
+                        pair_adjustments = pair_adjustments[
+                            ~pair_adjustments["is_subtotal"].fillna(False).astype(bool)
+                        ]
                     has_detail = (
-                        not adjustment_frame.empty
-                        and "pair_id" in adjustment_frame.columns
-                        and adjustment_frame["pair_id"].astype(str).eq(pair_id).any()
+                        not pair_adjustments.empty
                     )
                     display = "—" if has_detail else (clean_space(pair.get("adjustment_display")) or "—")
                 else:
@@ -3060,6 +3158,8 @@ def make_reconciliation_bridge_table(
                         adjustment_frame.get("pair_id", pd.Series(dtype=str)).astype(str).eq(pair_id)
                         & adjustment_frame.get("adjustment_label", pd.Series(dtype=str)).astype(str).str.lower().eq(label_key)
                     ] if not adjustment_frame.empty and {"pair_id", "adjustment_label"}.issubset(adjustment_frame.columns) else pd.DataFrame()
+                    if not candidates.empty and "is_subtotal" in candidates.columns:
+                        candidates = candidates[~candidates["is_subtotal"].fillna(False).astype(bool)]
                     if not candidates.empty:
                         display = clean_space(candidates.iloc[0].get("adjustment_display")) or "—"
             row[period] = display

@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -682,7 +683,43 @@ BCG_OVERRIDE_CSS = """
   --bcg-blue: #006F8E;
 }
 
-.stApp { background: var(--bcg-canvas) !important; }
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+  color-scheme: light !important;
+  background: var(--bcg-canvas) !important;
+  color: var(--bcg-ink) !important;
+}
+[data-testid="stMarkdownContainer"] a,
+.stLinkButton a {
+  color: #005F86 !important;
+  font-weight: 700 !important;
+  text-decoration: underline !important;
+  text-underline-offset: 0.14em;
+}
+[data-testid="stAlert"] {
+  background: #FFF4CC !important;
+  border: 1px solid #D99700 !important;
+  border-left: 4px solid #A86700 !important;
+  color: #3D2B00 !important;
+  opacity: 1 !important;
+}
+[data-testid="stAlert"] *,
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] span {
+  color: #3D2B00 !important;
+  opacity: 1 !important;
+}
+[data-testid="stAlert"] a { color: #005F86 !important; }
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] [role="gridcell"],
+[data-testid="stDataFrame"] [role="columnheader"] {
+  color-scheme: light !important;
+  color: #1D2B27 !important;
+}
+[data-testid="stDataFrame"] [role="gridcell"] *,
+[data-testid="stDataFrame"] [role="columnheader"] * {
+  color: inherit !important;
+  opacity: 1 !important;
+}
 [data-testid="stHeader"] {
   height: 3.75rem !important;
   background: var(--bcg-forest) !important;
@@ -1281,6 +1318,127 @@ def build_bridge_export_frame(
     return pd.DataFrame(rows, columns=columns)
 
 
+def write_presentation_bridge_sheet(
+    workbook: Any,
+    company: dict[str, Any],
+    bridge_rows: pd.DataFrame,
+) -> None:
+    """Create a clean, issuer-style GAAP-to-non-GAAP bridge sheet for Excel review."""
+    worksheet = workbook.create_sheet("Reconciliation bridges")
+    forest_fill = PatternFill("solid", fgColor="135B44")
+    section_fill = PatternFill("solid", fgColor="CFE9E0")
+    header_fill = PatternFill("solid", fgColor="E7E5E4")
+    white_font = Font(color="FFFFFF", bold=True)
+    title_font = Font(color="FFFFFF", bold=True, size=16)
+    subtitle_font = Font(bold=True, size=11, color="1D2B27")
+    source_font = Font(color="0000FF")
+    subtotal_font = Font(bold=True, color="000000")
+    adjustment_font = Font(color="0000FF")
+    link_font = Font(color="008000", underline="single")
+    thin_green = Side(style="thin", color="135B44")
+    double_green = Side(style="double", color="135B44")
+
+    worksheet.sheet_view.showGridLines = False
+    worksheet.column_dimensions["A"].width = 2
+    worksheet.column_dimensions["B"].width = 2
+    worksheet.column_dimensions["C"].width = 42
+    worksheet.column_dimensions["D"].width = 18
+    worksheet.column_dimensions["E"].width = 30
+    worksheet.column_dimensions["F"].width = 20
+    worksheet.column_dimensions["G"].width = 18
+    worksheet.column_dimensions["H"].width = 42
+
+    worksheet.merge_cells("C3:H3")
+    worksheet["C3"] = f"{clean_text(company.get('name')) or clean_text(company.get('ticker'))} — Reconciliation Bridges"
+    worksheet["C3"].fill = forest_fill
+    worksheet["C3"].font = title_font
+    worksheet["C3"].alignment = Alignment(vertical="center")
+    worksheet.row_dimensions[3].height = 25
+    worksheet.merge_cells("C5:H5")
+    worksheet["C5"] = "GAAP-to-non-GAAP reconciliations reproduced from matched earnings 8-K exhibits"
+    worksheet["C5"].font = subtitle_font
+    worksheet.merge_cells("C6:H6")
+    worksheet["C6"] = "Values are shown as reported by the issuer; labels and units are not standardized across companies. Blue values are SEC-sourced inputs."
+    worksheet["C6"].font = Font(italic=True, color="52635C")
+
+    row_number = 8
+    if bridge_rows is None or bridge_rows.empty:
+        worksheet.merge_cells(start_row=row_number, start_column=3, end_row=row_number, end_column=8)
+        worksheet.cell(row_number, 3).value = "No structured reconciliation bridges were extracted for the selected fiscal periods."
+        worksheet.cell(row_number, 3).font = Font(italic=True, color="52635C")
+    else:
+        data = bridge_rows.copy()
+        group_columns = ["Fiscal period", "Non-GAAP metric"]
+        for (period, metric), group in data.groupby(group_columns, sort=False, dropna=False):
+            source_url = clean_text(group["SEC source"].iloc[0]) if "SEC source" in group.columns else ""
+            source_type = clean_text(group["Source type"].iloc[0]) if "Source type" in group.columns else ""
+            worksheet.merge_cells(start_row=row_number, start_column=3, end_row=row_number, end_column=8)
+            section_cell = worksheet.cell(row_number, 3)
+            section_cell.value = f"{clean_text(period)} | {clean_text(metric)}"
+            section_cell.fill = section_fill
+            section_cell.font = Font(bold=True, color="1D2B27")
+            section_cell.alignment = Alignment(vertical="center")
+            row_number += 1
+
+            headers = ["Reconciliation line item", "Reported value", "Normalized category", "Row type", "Source", "SEC exhibit"]
+            for column_number, header in enumerate(headers, start=3):
+                cell = worksheet.cell(row_number, column_number)
+                cell.value = header
+                cell.fill = header_fill
+                cell.font = Font(bold=True, color="1D2B27")
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = Border(bottom=thin_green)
+            row_number += 1
+
+            for _, bridge_row in group.sort_values("Row order").iterrows():
+                row_type = clean_text(bridge_row.get("Row type"))
+                values = [
+                    clean_text(bridge_row.get("Line item")),
+                    clean_text(bridge_row.get("Reported value")),
+                    clean_text(bridge_row.get("Normalized adjustment category")),
+                    row_type,
+                    source_type,
+                    "Open SEC exhibit" if source_url else "",
+                ]
+                for column_number, value in enumerate(values, start=3):
+                    cell = worksheet.cell(row_number, column_number)
+                    cell.value = value
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+                    if column_number == 4 and value:
+                        cell.font = source_font
+                        cell.comment = Comment(
+                            f"Source: Matched SEC earnings 8-K exhibit\nPeriod: {clean_text(period)}\n"
+                            f"Metric: {clean_text(metric)}\nDocument type: {source_type}\nURL: {source_url}",
+                            "SEC Non-GAAP Metrics Explorer",
+                        )
+                    if column_number == 8 and source_url:
+                        cell.hyperlink = source_url
+                        cell.font = link_font
+                label_cell = worksheet.cell(row_number, 3)
+                if row_type == "GAAP":
+                    for cell in worksheet[row_number][2:8]:
+                        cell.font = source_font if cell.column == 4 else link_font if cell.column == 8 else Font(bold=True, color="000000")
+                        cell.border = Border(top=thin_green)
+                elif row_type == "Non-GAAP":
+                    for cell in worksheet[row_number][2:8]:
+                        cell.font = source_font if cell.column == 4 else link_font if cell.column == 8 else Font(bold=True, color="000000")
+                        cell.border = Border(top=thin_green, bottom=double_green)
+                else:
+                    label_cell.alignment = Alignment(vertical="top", wrap_text=True, indent=1)
+                    if "not parsed" in row_type.lower():
+                        label_cell.font = Font(italic=True, color="52635C")
+                row_number += 1
+            row_number += 1
+
+    worksheet.freeze_panes = "C8"
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 0
+    worksheet.print_area = f"B2:H{max(row_number, 8)}"
+    worksheet.oddFooter.center.text = "Reconciliation bridges — Page &P of &N"
+
+
 def build_excel_export(
     company: dict[str, Any],
     selected_years: list[int],
@@ -1338,7 +1496,6 @@ def build_excel_export(
     sheets: list[tuple[str, pd.DataFrame]] = [
         ("Summary", summary),
         ("Extracted metrics", extracted_metrics),
-        ("Reconciliation bridges", presentation_bridges),
         ("Metric matrix", matrix),
         ("Trend analysis", trends),
         ("Reconciliation detail", reconciliations),
@@ -1366,6 +1523,10 @@ def build_excel_export(
         workbook = writer.book
         for worksheet in workbook.worksheets:
             style_data_sheet(worksheet)
+        write_presentation_bridge_sheet(workbook, company, presentation_bridges)
+        bridge_sheet = workbook["Reconciliation bridges"]
+        workbook._sheets.remove(bridge_sheet)
+        workbook._sheets.insert(2, bridge_sheet)
         summary_sheet = workbook["Summary"]
         summary_sheet["A1"].font = Font(bold=True)
         summary_sheet["B1"].font = Font(bold=True)
@@ -1411,6 +1572,8 @@ def adjustment_chart_frame(adjustment_history: pd.DataFrame, metric: str) -> tup
     if adjustment_history.empty:
         return pd.DataFrame(), ""
     data = adjustment_history[adjustment_history["metric"].astype(str).eq(str(metric))].copy()
+    if "is_subtotal" in data.columns:
+        data = data[~data["is_subtotal"].fillna(False).astype(bool)].copy()
     if data.empty:
         return pd.DataFrame(), ""
     unit = clean_text(data["unit"].mode().iloc[0]) if "unit" in data.columns and not data["unit"].mode().empty else "number"
@@ -1495,6 +1658,7 @@ def tieout_view(frame: pd.DataFrame) -> pd.DataFrame:
         "metric",
         "gaap_display",
         "parsed_adjustment_display",
+        "issuer_subtotal_display",
         "expected_adjustment_display",
         "variance_display",
         "non_gaap_display",
@@ -1511,6 +1675,7 @@ def tieout_view(frame: pd.DataFrame) -> pd.DataFrame:
             "metric": "Non-GAAP metric",
             "gaap_display": "GAAP",
             "parsed_adjustment_display": "Parsed line items",
+            "issuer_subtotal_display": "Issuer subtotal",
             "expected_adjustment_display": "Non-GAAP minus GAAP",
             "variance_display": "Difference",
             "non_gaap_display": "Non-GAAP",
@@ -1720,6 +1885,88 @@ def resolve_exact_ticker(client: ng.SecClient, ticker: str) -> Optional[dict[str
     exact = matches[matches["ticker"].astype(str).str.upper().eq(ticker)]
     row = exact.iloc[0] if not exact.empty else matches.iloc[0]
     return {"cik": int(row["cik"]), "ticker": clean_text(row.get("ticker")), "name": clean_text(row.get("name"))}
+
+
+def _company_lookup_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", clean_text(value).lower())
+
+
+def _company_name_key(value: Any) -> str:
+    text = clean_text(value).lower()
+    text = re.sub(r"\b(?:incorporated|corporation|corp\.?|inc\.?|limited|ltd\.?|plc|holdings?)\b", "", text)
+    return _company_lookup_key(text)
+
+
+def parse_peer_company_queries(value: str) -> list[str]:
+    """Split ticker lists without breaking multi-word issuer names.
+
+    Commas, semicolons, and new lines are the unambiguous company separators. A
+    space-separated sequence is split only when every token resembles an all-caps
+    ticker, so both ``AAPL MSFT`` and ``Lattice Semiconductor, Marvell`` work.
+    """
+    entries: list[str] = []
+    for segment in re.split(r"[,;\n]+", value or ""):
+        candidate = clean_text(segment)
+        if not candidate:
+            continue
+        space_tokens = candidate.split()
+        if (
+            len(space_tokens) > 1
+            and all(re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", token or "") for token in space_tokens)
+        ):
+            entries.extend(space_tokens)
+        else:
+            entries.append(candidate)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        key = _company_lookup_key(entry)
+        if key and key not in seen:
+            deduped.append(entry)
+            seen.add(key)
+    return deduped
+
+
+def resolve_peer_company(client: ng.SecClient, query: str) -> Optional[dict[str, Any]]:
+    """Resolve a peer entered as a ticker, legal name, or recognizable name fragment."""
+    requested = clean_text(query)
+    if not requested:
+        return None
+    search_terms = [requested]
+    base_name = re.sub(r"\b(?:incorporated|corporation|corp\.?|inc\.?|limited|ltd\.?|plc|holdings?)\b", "", requested, flags=re.I)
+    base_name = clean_text(base_name)
+    if base_name and base_name.lower() != requested.lower():
+        search_terms.append(base_name)
+    matches = pd.DataFrame()
+    for search_term in search_terms:
+        matches = ng.search_companies(client, query=search_term, limit=50)
+        if not matches.empty:
+            break
+    if matches.empty:
+        return None
+    candidates = matches.copy()
+    for column in ["ticker", "name"]:
+        if column not in candidates.columns:
+            candidates[column] = ""
+        candidates[column] = candidates[column].map(clean_text)
+    query_key = _company_name_key(requested)
+    ticker_query = requested.upper()
+    candidates["_score"] = 0
+    candidates.loc[candidates["ticker"].str.upper().eq(ticker_query), "_score"] = 100
+    candidates.loc[candidates["name"].map(_company_name_key).eq(query_key), "_score"] = 95
+    candidates.loc[
+        candidates["name"].str.lower().str.startswith(requested.lower()) & candidates["_score"].lt(90), "_score"
+    ] = 80
+    candidates.loc[
+        candidates["name"].str.lower().str.contains(requested.lower(), regex=False) & candidates["_score"].lt(80), "_score"
+    ] = 70
+    row = candidates.sort_values(["_score", "ticker", "name"], ascending=[False, True, True]).iloc[0]
+    return {
+        "cik": int(row["cik"]),
+        "ticker": clean_text(row.get("ticker")),
+        "name": clean_text(row.get("name")),
+        "peer_query": requested,
+    }
 
 
 def analyze_peer_company(
@@ -2225,8 +2472,10 @@ with tab_bridge:
             )
             if bridge_frame["Line item"].astype(str).str.contains("individual items not parsed", case=False).any():
                 st.warning(
-                    "At least one period has a GAAP-to-non-GAAP endpoint difference but no parsed line-item detail. "
-                    "Open the linked exhibit and review Source audit; the app marks the gap rather than hiding it."
+                    "**Incomplete reconciliation detail — review required.** The app read the reported GAAP and non-GAAP totals, "
+                    "but could not confidently extract every individual adjustment line from at least one source table. "
+                    "The displayed total adjustment is calculated as **Non-GAAP minus GAAP**; it is not a sum of unverified line items. "
+                    "Use **Open SEC source exhibit** or **Source audit** to review the original table."
                 )
             period_links = source_rows_for_bridge[["period", "source_role", "source_url"]].drop_duplicates()
             if not period_links.empty:
@@ -2795,11 +3044,11 @@ with tab_peer:
     current_ticker = _first_ticker(company)
     default_peer_text = current_ticker
     peer_text = st.text_area(
-        "Peer tickers (comma, space, or one per line; maximum eight)",
+        "Peer companies or tickers (comma, semicolon, or one per line; maximum eight)",
         value=default_peer_text,
-        placeholder="LSCC, MCHP, AMD, MRVL, QUIK",
+        placeholder="Lattice Semiconductor, Microchip Technology, AMD\nMarvell Technology; LSCC",
         key="peer_ticker_input",
-        help="The current issuer can be reused without a second SEC analysis. Add public-company tickers for a live peer set.",
+        help="Enter a ticker, a company name, or a recognizable name fragment. Separate company names with commas, semicolons, or new lines. A space-separated all-caps ticker list such as AAPL MSFT AMD also works.",
     )
     peer_control_columns = st.columns([1, 1, 2])
     with peer_control_columns[0]:
@@ -2832,23 +3081,19 @@ with tab_peer:
         key="run_peer_benchmark",
     )
     if run_peer_analysis:
-        raw_tickers = [
-            token.upper()
-            for token in re.split(r"[\s,;]+", peer_text or "")
-            if clean_text(token)
-        ]
-        tickers: list[str] = []
-        for ticker in raw_tickers:
-            if ticker not in tickers:
-                tickers.append(ticker)
-        if current_ticker and current_ticker not in tickers:
-            tickers.insert(0, current_ticker)
-        tickers = tickers[:8]
+        peer_queries = parse_peer_company_queries(peer_text)
+        current_name_key = _company_lookup_key(company.get("name"))
+        current_ticker_key = _company_lookup_key(current_ticker)
+        if current_ticker and not any(
+            _company_lookup_key(query) in {current_ticker_key, current_name_key} for query in peer_queries
+        ):
+            peer_queries.insert(0, current_ticker)
+        peer_queries = peer_queries[:8]
 
         if not ng.SecClient.valid_contact(contact_email):
             st.error("Enter a valid SEC contact email before running the peer benchmark.")
-        elif not tickers:
-            st.error("Enter at least one ticker.")
+        elif not peer_queries:
+            st.error("Enter at least one peer company name or ticker.")
         else:
             peer_results: list[tuple[dict[str, Any], dict[str, pd.DataFrame]]] = []
             peer_company_rows: list[dict[str, Any]] = []
@@ -2856,22 +3101,24 @@ with tab_peer:
             peer_status = st.status("Starting peer benchmark...", expanded=True)
             client = get_client(contact_email.strip())
 
-            for peer_index, ticker in enumerate(tickers, start=1):
+            resolved_ciks: set[int] = set()
+            for peer_index, query in enumerate(peer_queries, start=1):
                 try:
                     peer_status.update(
-                        label=f"Peer {peer_index} of {len(tickers)}: resolving {ticker}...",
+                        label=f"Peer {peer_index} of {len(peer_queries)}: resolving {query}...",
                         state="running",
                     )
-                    if ticker == current_ticker:
+                    query_key = _company_lookup_key(query)
+                    if query_key in {current_ticker_key, current_name_key}:
                         peer_company = dict(company)
                         peer_result = analysis
                     else:
-                        resolved = resolve_exact_ticker(client, ticker)
+                        resolved = resolve_peer_company(client, query)
                         if resolved is None:
-                            raise ValueError("Ticker was not found in the SEC company-ticker universe.")
+                            raise ValueError("No SEC company-ticker match was found for this name or ticker.")
 
-                        def peer_progress(message: str, _ticker: str = ticker) -> None:
-                            peer_status.update(label=f"{_ticker}: {message}", state="running")
+                        def peer_progress(message: str, _query: str = query) -> None:
+                            peer_status.update(label=f"{_query}: {message}", state="running")
 
                         peer_company, peer_result = analyze_peer_company(
                             client,
@@ -2879,6 +3126,10 @@ with tab_peer:
                             progress=peer_progress,
                             max_exhibits=int(peer_max_exhibits),
                         )
+                    peer_cik = int(peer_company["cik"])
+                    if peer_cik in resolved_ciks:
+                        continue
+                    resolved_ciks.add(peer_cik)
                     peer_results.append((peer_company, peer_result))
                     peer_company_rows.append(
                         {
@@ -2892,7 +3143,7 @@ with tab_peer:
                         }
                     )
                 except Exception as exc:
-                    peer_errors.append({"Ticker": ticker, "Error": clean_text(exc)})
+                    peer_errors.append({"Peer entry": query, "Error": clean_text(exc)})
 
             st.session_state.peer_analysis = combine_peer_results(peer_results) if peer_results else None
             st.session_state.peer_companies = pd.DataFrame(peer_company_rows)

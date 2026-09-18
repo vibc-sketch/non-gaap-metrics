@@ -9,13 +9,22 @@ from typing import Any, Optional
 
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 import sec_nongaap as ng
 
 
-FUNCTION_NAMES = {"clean_text", "format_date", "excel_ready", "style_data_sheet", "build_bridge_export_frame", "build_excel_export"}
+FUNCTION_NAMES = {
+    "clean_text",
+    "format_date",
+    "excel_ready",
+    "style_data_sheet",
+    "build_bridge_export_frame",
+    "write_presentation_bridge_sheet",
+    "build_excel_export",
+}
 
 
 def _load_excel_export_function() -> Any:
@@ -32,6 +41,7 @@ def _load_excel_export_function() -> Any:
         "re": re,
         "pd": pd,
         "ng": ng,
+        "Comment": Comment,
         "Alignment": Alignment,
         "Border": Border,
         "Font": Font,
@@ -105,5 +115,8 @@ def test_excel_export_contains_primary_sheets_and_clickable_sec_source() -> None
     assert metrics_sheet.cell(2, source_column).hyperlink.target == source_url
 
     bridge_sheet = workbook["Reconciliation bridges"]
-    bridge_headers = [cell.value for cell in bridge_sheet[1]]
-    assert {"Line item", "Reported value", "SEC source"}.issubset(bridge_headers)
+    assert bridge_sheet["C3"].value == "Example Issuer — Reconciliation Bridges"
+    assert bridge_sheet["C9"].value == "Reconciliation line item"
+    assert bridge_sheet["D10"].value == "$10.0"
+    assert bridge_sheet["D10"].comment is not None
+    assert bridge_sheet["H10"].hyperlink.target == source_url
