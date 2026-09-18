@@ -333,7 +333,332 @@ hr, [data-testid="stDivider"] {
 }
 </style>
 """
-st.html(CUSTOM_CSS)
+ENTERPRISE_CSS = """
+<style>
+:root {
+  --enterprise-ink: #122033;
+  --enterprise-muted: #526276;
+  --enterprise-faint: #718096;
+  --enterprise-surface: #FFFFFF;
+  --enterprise-canvas: #F4F7FB;
+  --enterprise-line: #D6E0EC;
+  --enterprise-navy: #102A43;
+  --enterprise-blue: #0866C6;
+  --enterprise-blue-hover: #0757AA;
+  --enterprise-teal: #087E8B;
+  --enterprise-success: #2B7A0B;
+  --enterprise-warning: #9A6700;
+}
+
+html, body, [class*="css"], .stApp {
+  color: var(--enterprise-ink) !important;
+}
+.stApp {
+  background: var(--enterprise-canvas) !important;
+}
+.block-container {
+  max-width: 1640px !important;
+  padding: 0.85rem 2rem 3.5rem !important;
+}
+.block-container::before {
+  display: none !important;
+}
+
+/* Persistent product bar keeps product identity available when navigation is collapsed. */
+.enterprise-topbar {
+  position: sticky;
+  top: 0.35rem;
+  z-index: 100;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 0.7rem 1rem;
+  margin: 0 0 1.35rem;
+  border: 1px solid rgba(16, 42, 67, 0.12);
+  border-radius: 12px;
+  background: rgba(16, 42, 67, 0.98);
+  box-shadow: 0 10px 25px rgba(16, 42, 67, 0.15);
+}
+.enterprise-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+.enterprise-mark {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: conic-gradient(from 210deg, #A6E22E, #49B6FF, #19A974, #A6E22E);
+  position: relative;
+}
+.enterprise-mark::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: var(--enterprise-navy);
+}
+.enterprise-product {
+  color: #FFFFFF;
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.enterprise-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.8rem;
+  color: #B7C4D3;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.enterprise-meta .divider {
+  color: #60758B;
+}
+.enterprise-byline {
+  color: #B7C4D3;
+  font-weight: 600;
+}
+
+.app-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin: 0.15rem 0 0.65rem;
+}
+.app-header {
+  gap: 0.8rem;
+  margin-bottom: 0;
+}
+.app-header .app-mark {
+  width: 38px;
+  height: 38px;
+  background: conic-gradient(from 210deg, var(--enterprise-success), #76D64F, var(--enterprise-blue), var(--enterprise-success));
+}
+.app-header .app-mark::after { background: var(--enterprise-canvas); }
+.app-kicker {
+  color: var(--enterprise-blue) !important;
+  font-size: 0.74rem !important;
+  letter-spacing: 0.11em;
+}
+.app-title {
+  color: var(--enterprise-ink) !important;
+  font-size: clamp(1.55rem, 2.3vw, 2.15rem) !important;
+  letter-spacing: -0.025em;
+}
+.app-title .accent { color: var(--enterprise-blue) !important; }
+.app-subtitle {
+  max-width: 880px;
+  margin: 0.35rem 0 0.95rem;
+  color: var(--enterprise-muted);
+  font-size: 0.98rem;
+  line-height: 1.55;
+}
+.app-status-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.7rem;
+  margin-bottom: 0.35rem;
+  border: 1px solid #B9DCCE;
+  border-radius: 999px;
+  background: #F0FAF5;
+  color: #1F5E3A;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.app-status-pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2B8A3E;
+}
+
+.source-rule {
+  border: 1px solid #B9D7ED !important;
+  border-left: 5px solid var(--enterprise-blue) !important;
+  border-radius: 10px !important;
+  padding: 0.9rem 1rem !important;
+  background: #EFF8FF !important;
+  color: #17324D !important;
+  font-size: 0.93rem !important;
+  line-height: 1.55;
+}
+
+/* High-contrast sidebar controls replace the low-contrast dark form fields. */
+[data-testid="stSidebar"] {
+  min-width: 326px !important;
+  background: var(--enterprise-navy) !important;
+  border-right: 0 !important;
+  box-shadow: 4px 0 18px rgba(16, 42, 67, 0.08);
+}
+[data-testid="stSidebar"] > div:first-child {
+  border-top: 0 !important;
+  padding: 1rem 0.9rem 2rem;
+}
+.sidebar-brand {
+  padding: 0.35rem 0.25rem 1rem;
+  border-bottom: 1px solid rgba(255,255,255,0.16);
+  margin-bottom: 1.05rem;
+}
+.sidebar-brand-title {
+  color: #FFFFFF;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.sidebar-brand-note {
+  margin-top: 0.22rem;
+  color: #B7C4D3;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+  color: #EDF4FA !important;
+}
+[data-testid="stSidebar"] [data-testid="stTextInput"] input,
+[data-testid="stSidebar"] [data-testid="stTextArea"] textarea,
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="input"] > div {
+  background: #FFFFFF !important;
+  color: var(--enterprise-ink) !important;
+  border-color: #B6C6D7 !important;
+}
+[data-testid="stSidebar"] input::placeholder,
+[data-testid="stSidebar"] textarea::placeholder {
+  color: #64748B !important;
+  opacity: 1 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] * {
+  color: var(--enterprise-ink) !important;
+}
+[data-testid="stSidebar"] .stButton button,
+[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button {
+  min-height: 2.65rem;
+  background: #FFFFFF !important;
+  color: var(--enterprise-navy) !important;
+  border: 1px solid #FFFFFF !important;
+  font-weight: 700;
+}
+[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stSidebar"] .stButton button:hover {
+  background: #DCEEFF !important;
+  border-color: #DCEEFF !important;
+}
+
+/* Inputs, buttons, cards, and tables stay readable against the light canvas. */
+.stTextInput input,
+.stTextArea textarea,
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div {
+  background: #FFFFFF !important;
+  color: var(--enterprise-ink) !important;
+  border-color: #B6C6D7 !important;
+}
+.stTextInput input:focus,
+.stTextArea textarea:focus {
+  border-color: var(--enterprise-blue) !important;
+  box-shadow: 0 0 0 2px rgba(8, 102, 198, 0.16) !important;
+}
+label, [data-testid="stWidgetLabel"] p {
+  color: var(--enterprise-ink) !important;
+  font-weight: 600 !important;
+}
+.stButton button,
+.stDownloadButton button {
+  min-height: 2.55rem;
+  border: 1px solid #B6C6D7 !important;
+  border-radius: 8px !important;
+  background: #FFFFFF !important;
+  color: var(--enterprise-ink) !important;
+  font-weight: 700 !important;
+}
+.stButton button[kind="primary"],
+[data-testid="stBaseButton-primary"] {
+  background: var(--enterprise-blue) !important;
+  color: #FFFFFF !important;
+  border-color: var(--enterprise-blue) !important;
+}
+.stButton button:hover,
+.stDownloadButton button:hover {
+  border-color: var(--enterprise-blue) !important;
+  background: #EFF6FF !important;
+}
+.stButton button[kind="primary"]:hover,
+[data-testid="stBaseButton-primary"]:hover {
+  background: var(--enterprise-blue-hover) !important;
+  color: #FFFFFF !important;
+}
+.info-card, .recon-card {
+  border-color: var(--enterprise-line) !important;
+  background: var(--enterprise-surface) !important;
+  box-shadow: 0 2px 8px rgba(16, 42, 67, 0.06) !important;
+}
+.info-card { border-top-color: var(--enterprise-blue) !important; }
+.recon-card { border-left-color: var(--enterprise-teal) !important; }
+.info-label, .recon-card .label, .info-note, .small-note {
+  color: var(--enterprise-muted) !important;
+}
+.info-value, .recon-card .value { color: var(--enterprise-ink) !important; }
+.success-note { background: #F0FAF5 !important; border-left-color: #2B8A3E !important; color: #194C30 !important; }
+.warning-note { background: #FFF8E6 !important; border-left-color: #C28500 !important; color: #6B4A00 !important; }
+.peer-note { background: #EDF7F2 !important; border-left-color: var(--enterprise-teal) !important; color: #174C46 !important; }
+
+.stTabs [data-baseweb="tab-list"] {
+  gap: 0.35rem !important;
+  padding: 0.25rem 0.25rem 0 !important;
+  border-bottom: 1px solid var(--enterprise-line) !important;
+  overflow-x: auto;
+}
+.stTabs [data-baseweb="tab"] {
+  color: var(--enterprise-muted) !important;
+  font-weight: 650;
+  padding: 0.68rem 0.8rem !important;
+}
+.stTabs [aria-selected="true"] { color: var(--enterprise-blue) !important; }
+.stTabs [data-baseweb="tab-highlight"] { background-color: var(--enterprise-blue) !important; }
+[data-testid="stDataFrame"], .bridge-wrap {
+  border-color: var(--enterprise-line) !important;
+  background: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(16, 42, 67, 0.04);
+}
+.bridge-table th, .bridge-table td { border-bottom-color: var(--enterprise-line) !important; }
+.bridge-table thead tr.company-head th { background: var(--enterprise-navy) !important; }
+.bridge-table thead tr.period-head th { background: var(--enterprise-blue) !important; }
+.bridge-table tr:nth-child(even) td { background: #F7FAFC !important; }
+.bridge-table tr.row-gaap td, .bridge-table tr.row-non-gaap td { background: #EAF2F8 !important; color: var(--enterprise-ink) !important; }
+
+@media (max-width: 760px) {
+  .block-container { padding: 0.65rem 0.75rem 2rem !important; }
+  .enterprise-topbar { min-height: 56px; padding: 0.55rem 0.7rem; margin-bottom: 1rem; border-radius: 9px; }
+  .enterprise-product { font-size: 0.86rem; }
+  .enterprise-meta .enterprise-source, .enterprise-meta .divider { display: none; }
+  .enterprise-meta { font-size: 0.72rem; }
+  .app-hero { align-items: flex-start; flex-direction: column; gap: 0.25rem; }
+  .app-status-pill { margin-bottom: 0; }
+  .app-title { font-size: 1.55rem !important; }
+  .app-subtitle { font-size: 0.92rem; }
+  [data-testid="stSidebar"] { min-width: min(86vw, 326px) !important; }
+  .info-card, .recon-card { min-height: auto !important; }
+  .stTabs [data-baseweb="tab"] { padding: 0.62rem 0.7rem !important; font-size: 0.86rem; }
+}
+</style>
+"""
+st.html(CUSTOM_CSS + ENTERPRISE_CSS)
 
 if ENGINE_API_MISSING:
     loaded_path = getattr(ng, "__file__", "unknown module path")
@@ -1288,16 +1613,33 @@ def peer_company_count_frame(matrix: pd.DataFrame, column_label: str) -> pd.Data
 
 st.markdown(
     f"""
-    <div class="app-kicker">Evidence-first SEC filing analysis</div>
-    <div class="app-header">
-      <div class="app-mark"></div>
-      <h1 class="app-title">SEC Non-GAAP <span class="accent">Reconciliation</span> &amp; Peer Benchmarking</h1>
+    <div class="enterprise-topbar">
+      <div class="enterprise-brand">
+        <div class="enterprise-mark"></div>
+        <div class="enterprise-product">SEC Non-GAAP Intelligence</div>
+      </div>
+      <div class="enterprise-meta">
+        <span class="enterprise-source">Evidence-first filing analysis</span>
+        <span class="divider">•</span>
+        <span class="enterprise-byline">Built by Vibhor</span>
+      </div>
+    </div>
+    <div class="app-hero">
+      <div>
+        <div class="app-kicker">Source-linked financial disclosure research</div>
+        <div class="app-header">
+          <div class="app-mark"></div>
+          <h1 class="app-title">SEC Non-GAAP <span class="accent">Reconciliation</span> &amp; Peer Benchmarking</h1>
+        </div>
+      </div>
+      <div class="app-status-pill">SEC source controlled</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
-st.caption(
-    "Structured GAAP-to-non-GAAP reconciliations, adjustment bridges, and additional non-GAAP callouts by issuer fiscal quarter."
+st.markdown(
+    '<div class="app-subtitle">Structured GAAP-to-non-GAAP reconciliations, adjustment bridges, definition evidence, and peer disclosure benchmarking by issuer fiscal quarter.</div>',
+    unsafe_allow_html=True,
 )
 st.markdown(
     """
@@ -1312,6 +1654,15 @@ st.markdown(
 
 
 with st.sidebar:
+    st.markdown(
+        """
+        <div class="sidebar-brand">
+          <div class="sidebar-brand-title">Research workspace</div>
+          <div class="sidebar-brand-note">Search an issuer, anchor its fiscal periods, then extract evidence from the matched earnings 8-K package.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.header("1. Search issuer")
     default_contact = os.getenv("SEC_CONTACT_EMAIL", "")
     contact_email = st.text_input(
