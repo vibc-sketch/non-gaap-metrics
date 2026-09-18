@@ -863,7 +863,324 @@ section[data-testid="stSidebar"],
 }
 </style>
 """
-st.html(CUSTOM_CSS + ENTERPRISE_CSS + BCG_OVERRIDE_CSS)
+
+APPLE_THEME_CSS = """
+<style>
+/* Apple-inspired design system. Every data surface declares a light color scheme
+   so browser, OS, and Streamlit dark-mode preferences cannot invert text contrast. */
+:root {
+  --apple-blue: #0071E3;
+  --apple-blue-hover: #0077ED;
+  --apple-ink: #1D1D1F;
+  --apple-secondary: #6E6E73;
+  --apple-canvas: #F5F5F7;
+  --apple-surface: #FFFFFF;
+  --apple-control: #E8E8ED;
+  --apple-line: #D2D2D7;
+  --apple-sidebar: #1D1D1F;
+  --apple-success: #1D8348;
+  --apple-warning-bg: #FFF4D6;
+  --apple-warning-ink: #5E3B00;
+  --apple-danger: #B42318;
+}
+
+html,
+body,
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="stMainBlockContainer"],
+section.main {
+  color-scheme: light !important;
+  background: var(--apple-canvas) !important;
+  color: var(--apple-ink) !important;
+}
+html { color-scheme: light !important; }
+
+/* Ensure common Streamlit surfaces never inherit dark-mode foreground colors. */
+[data-testid="stAppViewContainer"] *,
+[data-testid="stMain"] *,
+[data-testid="stMainBlockContainer"] * {
+  color-scheme: light !important;
+}
+[data-testid="stMain"] p,
+[data-testid="stMain"] span,
+[data-testid="stMain"] label,
+[data-testid="stMain"] li,
+[data-testid="stMain"] small,
+[data-testid="stMain"] [data-testid="stCaptionContainer"],
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] {
+  color: var(--apple-ink) !important;
+  opacity: 1 !important;
+}
+[data-testid="stMain"] [data-testid="stCaptionContainer"],
+[data-testid="stMain"] .stCaption,
+[data-testid="stMain"] small {
+  color: var(--apple-secondary) !important;
+}
+
+[data-testid="stHeader"] {
+  height: 3.75rem !important;
+  background: rgba(255, 255, 255, 0.96) !important;
+  border-bottom: 1px solid var(--apple-line) !important;
+  backdrop-filter: blur(18px) saturate(180%);
+}
+[data-testid="stHeader"] button,
+[data-testid="stHeader"] [data-testid="stBaseButton-header"] {
+  color: var(--apple-ink) !important;
+}
+
+.enterprise-topbar {
+  background: var(--apple-sidebar) !important;
+  border: 1px solid #000000 !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16) !important;
+}
+.enterprise-mark {
+  background: conic-gradient(from 210deg, #0A84FF, #5E5CE6, #64D2FF, #0A84FF) !important;
+}
+.enterprise-mark::after { background: var(--apple-sidebar) !important; }
+.enterprise-product { color: #FFFFFF !important; }
+.enterprise-product .product-accent { color: #64D2FF !important; }
+.enterprise-meta,
+.enterprise-byline { color: #D2D2D7 !important; }
+.enterprise-meta .divider { color: #86868B !important; }
+.enterprise-topbar .enterprise-meta,
+.enterprise-topbar .enterprise-meta *,
+.enterprise-topbar .enterprise-byline {
+  color: #D2D2D7 !important;
+  opacity: 1 !important;
+}
+.enterprise-topbar .enterprise-meta .divider { color: #86868B !important; }
+
+.app-kicker { color: var(--apple-blue) !important; }
+.workspace-heading,
+.app-title,
+h1, h2, h3, h4, h5, h6 { color: var(--apple-ink) !important; }
+.app-subtitle,
+.info-label,
+.recon-card .label,
+.info-note,
+.small-note { color: var(--apple-secondary) !important; }
+.app-status-pill {
+  background: #EAF7EE !important;
+  border-color: #A7DDB5 !important;
+  color: #146C2E !important;
+}
+.app-status-pill::before { background: #1D8348 !important; }
+.source-rule {
+  background: #EEF5FF !important;
+  border-color: #B7D5F8 !important;
+  border-left-color: var(--apple-blue) !important;
+  color: #183A62 !important;
+}
+.source-rule * { color: #183A62 !important; }
+
+[data-testid="stSidebar"],
+section[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div,
+[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+  color-scheme: light !important;
+  background: var(--apple-sidebar) !important;
+  color: #F5F5F7 !important;
+}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] * {
+  color: #F5F5F7 !important;
+  opacity: 1 !important;
+}
+.sidebar-brand { border-bottom-color: #424245 !important; }
+.sidebar-brand-title { color: #FFFFFF !important; }
+.sidebar-brand-note { color: #D2D2D7 !important; }
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="input"] > div {
+  background: #FFFFFF !important;
+  color: var(--apple-ink) !important;
+  border-color: #A1A1A6 !important;
+}
+[data-testid="stSidebar"] input::placeholder,
+[data-testid="stSidebar"] textarea::placeholder { color: #86868B !important; }
+[data-testid="stSidebar"] input *,
+[data-testid="stSidebar"] textarea *,
+[data-testid="stSidebar"] [data-baseweb="select"] * {
+  color: var(--apple-ink) !important;
+}
+
+.stButton button,
+.stDownloadButton button,
+[data-testid="stBaseButton-secondary"] {
+  background: #FFFFFF !important;
+  color: var(--apple-blue) !important;
+  border-color: #B8B8BE !important;
+  font-weight: 700 !important;
+}
+.stButton button[kind="primary"],
+[data-testid="stBaseButton-primary"],
+[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button,
+[data-testid="stSidebar"] .stButton button[kind="primary"],
+[data-testid="stSidebar"] [data-testid="stBaseButton-primary"] {
+  background: var(--apple-blue) !important;
+  border-color: var(--apple-blue) !important;
+  color: #FFFFFF !important;
+}
+.stButton button[kind="primary"] *,
+[data-testid="stBaseButton-primary"] *,
+[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button * { color: #FFFFFF !important; }
+.stButton button:hover,
+.stDownloadButton button:hover {
+  background: #F0F7FF !important;
+  border-color: var(--apple-blue) !important;
+  color: #005BB5 !important;
+}
+.stButton button[kind="primary"]:hover,
+[data-testid="stBaseButton-primary"]:hover {
+  background: var(--apple-blue-hover) !important;
+  color: #FFFFFF !important;
+}
+
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-baseweb="input"] input,
+[data-baseweb="select"] > div {
+  color-scheme: light !important;
+  background: #FFFFFF !important;
+  color: var(--apple-ink) !important;
+  border-color: #A1A1A6 !important;
+}
+[data-testid="stTextInput"] input::placeholder,
+[data-testid="stTextArea"] textarea::placeholder { color: #86868B !important; }
+[data-testid="stNumberInput"],
+[data-testid="stNumberInput"] [data-baseweb="input"],
+[data-testid="stNumberInput"] [data-baseweb="input"] > div,
+[data-testid="stNumberInput"] input {
+  color-scheme: light !important;
+  background: #FFFFFF !important;
+  color: var(--apple-ink) !important;
+  border-color: #A1A1A6 !important;
+}
+[data-testid="stNumberInput"] input { font-weight: 700 !important; }
+[data-testid="stNumberInput"] button,
+[data-testid="stNumberInput"] [data-baseweb="input"] button,
+[data-testid="stNumberInput"] button:hover,
+[data-testid="stNumberInput"] [data-baseweb="input"] button:hover {
+  background: #FFFFFF !important;
+  color: var(--apple-blue) !important;
+  border-color: #A1A1A6 !important;
+  opacity: 1 !important;
+}
+[data-testid="stNumberInput"] button *,
+[data-testid="stNumberInput"] [data-baseweb="input"] button * { color: var(--apple-blue) !important; }
+[data-baseweb="popover"],
+[role="listbox"],
+[data-baseweb="menu"] {
+  color-scheme: light !important;
+  background: #FFFFFF !important;
+  color: var(--apple-ink) !important;
+}
+[role="option"],
+[data-baseweb="menu"] * { color: var(--apple-ink) !important; }
+
+[data-testid="stAlert"] {
+  background: var(--apple-warning-bg) !important;
+  border: 1px solid #E3B341 !important;
+  border-left: 4px solid #B7791F !important;
+  color: var(--apple-warning-ink) !important;
+  opacity: 1 !important;
+}
+[data-testid="stAlert"] *,
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] span { color: var(--apple-warning-ink) !important; opacity: 1 !important; }
+[data-testid="stAlert"] a,
+[data-testid="stMarkdownContainer"] a,
+.stLinkButton a { color: #005BB5 !important; font-weight: 700 !important; text-decoration: underline !important; text-underline-offset: 0.14em; }
+
+.stTabs [role="tablist"],
+.stTabs [data-baseweb="tab-list"] {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  overflow: visible !important;
+  gap: 0.3rem !important;
+  padding: 0.32rem !important;
+  margin-bottom: 0.85rem !important;
+  border: 0 !important;
+  border-radius: 12px !important;
+  background: var(--apple-control) !important;
+}
+.stTabs [role="tab"],
+.stTabs [data-baseweb="tab"] {
+  min-height: 2.35rem !important;
+  padding: 0.5rem 0.82rem !important;
+  border: 1px solid transparent !important;
+  border-radius: 9px !important;
+  background: transparent !important;
+  color: #3A3A3C !important;
+  opacity: 1 !important;
+  font-weight: 700 !important;
+}
+.stTabs [role="tab"] *,
+.stTabs [data-baseweb="tab"] * { color: inherit !important; opacity: 1 !important; }
+.stTabs [role="tab"]:not([aria-selected="true"]):hover,
+.stTabs [data-baseweb="tab"]:not([aria-selected="true"]):hover { background: #DCDCE1 !important; color: var(--apple-ink) !important; }
+.stTabs [role="tab"][aria-selected="true"],
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+  background: #FFFFFF !important;
+  border-color: #D2D2D7 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.10) !important;
+  color: var(--apple-blue) !important;
+}
+.stTabs [data-baseweb="tab-highlight"] { display: none !important; }
+
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] [role="gridcell"],
+[data-testid="stDataFrame"] [role="columnheader"],
+.bridge-wrap,
+.bridge-table td {
+  color-scheme: light !important;
+  color: var(--apple-ink) !important;
+  background-color: #FFFFFF !important;
+  opacity: 1 !important;
+}
+[data-testid="stDataFrame"] [role="gridcell"] *,
+[data-testid="stDataFrame"] [role="columnheader"] * { color: inherit !important; opacity: 1 !important; }
+.bridge-table th { color: #FFFFFF !important; }
+.bridge-table thead tr.company-head th { background: var(--apple-sidebar) !important; }
+.bridge-table thead tr.period-head th { background: var(--apple-blue) !important; }
+.bridge-table tr:nth-child(even) td { background: #F5F5F7 !important; }
+.bridge-table tr.row-gaap td,
+.bridge-table tr.row-non-gaap td { background: #EEF5FF !important; color: var(--apple-ink) !important; }
+
+.info-card,
+.recon-card,
+[data-testid="stExpander"],
+[data-testid="stStatusWidget"] {
+  background: #FFFFFF !important;
+  border-color: var(--apple-line) !important;
+  color: var(--apple-ink) !important;
+}
+.info-card { border-top-color: var(--apple-blue) !important; }
+.recon-card { border-left-color: var(--apple-blue) !important; }
+.success-note { background: #EAF7EE !important; border-left-color: #1D8348 !important; color: #155724 !important; }
+.warning-note { background: var(--apple-warning-bg) !important; border-left-color: #B7791F !important; color: var(--apple-warning-ink) !important; }
+.peer-note { background: #EEF5FF !important; border-left-color: var(--apple-blue) !important; color: #183A62 !important; }
+
+@media (max-width: 760px) {
+  section.main .block-container,
+  [data-testid="stAppViewContainer"] .main .block-container,
+  [data-testid="stMainBlockContainer"] { padding-top: 4.5rem !important; }
+  .enterprise-meta { color: #D2D2D7 !important; }
+  .stTabs [role="tab"], .stTabs [data-baseweb="tab"] { font-size: 0.84rem !important; }
+}
+</style>
+"""
+st.html(CUSTOM_CSS + ENTERPRISE_CSS + BCG_OVERRIDE_CSS + APPLE_THEME_CSS)
 
 if ENGINE_API_MISSING:
     loaded_path = getattr(ng, "__file__", "unknown module path")
