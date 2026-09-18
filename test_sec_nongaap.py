@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+import pandas as pd
 import pytest
 
 import sec_nongaap as ng
@@ -99,3 +100,53 @@ def test_sec_client_evicts_old_documents_from_bounded_cache() -> None:
     assert isinstance(client._cache, OrderedDict)
     assert list(client._cache) == [two.url]
     assert client._cache_bytes == len(two.content)
+
+
+def test_export_metrics_table_retains_reconciliation_and_source_fields() -> None:
+    reconciliations = pd.DataFrame(
+        [
+            {
+                "pair_id": "pair-1",
+                "period": "FY2026 Q2",
+                "period_end": "2026-06-30",
+                "metric": "Adjusted EBITDA",
+                "gaap_label": "Net income",
+                "gaap_display": "$10.0",
+                "adjustment_display": "$4.0",
+                "non_gaap_label": "Adjusted EBITDA",
+                "non_gaap_display": "$14.0",
+                "unit": "usd",
+                "scale": "millions",
+                "confidence": "High",
+                "source_role": "Press release",
+                "source_page": 3,
+                "source_url": SEC_SOURCE["url"],
+            }
+        ]
+    )
+    tieouts = pd.DataFrame(
+        [{"pair_id": "pair-1", "tie_out_status": "Ties within rounding", "tie_out_note": "Difference: $0.0"}]
+    )
+
+    export = ng.make_export_metrics_table(reconciliations, tieouts)
+
+    assert export.to_dict("records") == [
+        {
+            "Fiscal period": "FY2026 Q2",
+            "Period end": "2026-06-30",
+            "Non-GAAP metric": "Adjusted EBITDA",
+            "Comparable GAAP label": "Net income",
+            "Comparable GAAP value": "$10.0",
+            "Total adjustments": "$4.0",
+            "Reported non-GAAP label": "Adjusted EBITDA",
+            "Reported non-GAAP value": "$14.0",
+            "Unit": "usd",
+            "Scale": "millions",
+            "Parse confidence": "High",
+            "Tie-out status": "Ties within rounding",
+            "Tie-out note": "Difference: $0.0",
+            "Source type": "Press release",
+            "PDF page": 3,
+            "SEC source": SEC_SOURCE["url"],
+        }
+    ]

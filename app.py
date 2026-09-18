@@ -28,6 +28,7 @@ REQUIRED_ENGINE_API = (
     "benchmark_metric_family",
     "make_peer_presence_matrix",
     "make_reconciliation_bridge_table",
+    "make_export_metrics_table",
     "extract_kpi_mentions",
     "extract_metric_definitions",
     "is_sec_resource_url",
@@ -810,6 +811,7 @@ def build_excel_export(
     adjustment_matrix = ng.make_adjustment_metric_matrix(adjustment_history)
     adjustment_summary = ng.adjustment_category_summary(adjustment_history)
     presentation_bridges = build_bridge_export_frame(reconciliations, adjustment_history)
+    extracted_metrics = ng.make_export_metrics_table(reconciliations, adjustment_tieouts)
 
     summary = pd.DataFrame(
         {
@@ -842,11 +844,12 @@ def build_excel_export(
 
     sheets: list[tuple[str, pd.DataFrame]] = [
         ("Summary", summary),
+        ("Extracted metrics", extracted_metrics),
+        ("Reconciliation bridges", presentation_bridges),
         ("Metric matrix", matrix),
         ("Trend analysis", trends),
-        ("Reconciliations", reconciliations),
+        ("Reconciliation detail", reconciliations),
         ("Metric definitions", definitions),
-        ("Presentation bridges", presentation_bridges),
         ("Adjustment history", adjustment_history),
         ("Adjustment matrix", adjustment_matrix),
         ("Adjustment summary", adjustment_summary),
@@ -1601,13 +1604,14 @@ export_payload["adjustment_category_matrix"] = ng.make_adjustment_metric_matrix(
 export_payload["adjustment_category_summary"] = ng.adjustment_category_summary(adjustment_history)
 export_payload["adjustment_tieouts"] = adjustment_tieouts
 export_payload["definitions"] = definitions
+export_payload["extracted_metrics"] = ng.make_export_metrics_table(reconciliations, adjustment_tieouts)
 excel_bytes = build_excel_export(company, st.session_state.analysis_years, analysis, matrix, trends)
 csv_zip_bytes = ng.build_export_zip(export_payload)
 
 download_columns = st.columns([1, 1, 2])
 with download_columns[0]:
     st.download_button(
-        "Download formatted Excel",
+        "Download metrics & reconciliations Excel",
         data=excel_bytes,
         file_name=f"{clean_text(company.get('ticker')) or company.get('cik')}_non_gaap_8k_analysis.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1622,7 +1626,9 @@ with download_columns[1]:
         use_container_width=True,
     )
 with download_columns[2]:
-    st.caption("Exports preserve fiscal-period labels, source URLs, parsing evidence, and warnings for review.")
+    st.caption(
+        "Excel starts with Extracted metrics and Reconciliation bridges, then includes definitions, detailed records, source URLs, parsing evidence, and warnings."
+    )
 
 
 tab_bridge, tab_metrics, tab_details, tab_adjustments, tab_additional, tab_definitions, tab_peer, tab_sources = st.tabs(

@@ -28,7 +28,7 @@ SEC_ALLOWED_HOSTS = {"sec.gov", "www.sec.gov", "data.sec.gov"}
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
 DEFAULT_CACHE_BYTES = 160 * 1024 * 1024
-APP_VERSION = "6.1.0"
+APP_VERSION = "6.2.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -3210,6 +3210,80 @@ def analyze_company_quarters(
         "evidence": evidence_df,
         "warnings": warnings_df,
     }
+
+
+def make_export_metrics_table(
+    reconciliations: pd.DataFrame,
+    adjustment_tieouts: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Create a concise, source-linked table for the Excel export's primary sheet."""
+    columns = [
+        "Fiscal period",
+        "Period end",
+        "Non-GAAP metric",
+        "Comparable GAAP label",
+        "Comparable GAAP value",
+        "Total adjustments",
+        "Reported non-GAAP label",
+        "Reported non-GAAP value",
+        "Unit",
+        "Scale",
+        "Parse confidence",
+        "Tie-out status",
+        "Tie-out note",
+        "Source type",
+        "PDF page",
+        "SEC source",
+    ]
+    if reconciliations is None or reconciliations.empty:
+        return pd.DataFrame(columns=columns)
+    source_columns = [
+        "pair_id",
+        "period",
+        "period_end",
+        "metric",
+        "gaap_label",
+        "gaap_display",
+        "adjustment_display",
+        "non_gaap_label",
+        "non_gaap_display",
+        "unit",
+        "scale",
+        "confidence",
+        "source_role",
+        "source_page",
+        "source_url",
+    ]
+    available = [column for column in source_columns if column in reconciliations.columns]
+    data = reconciliations[available].copy()
+    if not data.empty and "pair_id" in data.columns and isinstance(adjustment_tieouts, pd.DataFrame) and not adjustment_tieouts.empty:
+        tieout_columns = [column for column in ["pair_id", "tie_out_status", "tie_out_note"] if column in adjustment_tieouts.columns]
+        if len(tieout_columns) > 1:
+            tieouts = adjustment_tieouts[tieout_columns].drop_duplicates("pair_id")
+            data = data.merge(tieouts, on="pair_id", how="left")
+    rename_map = {
+        "period": "Fiscal period",
+        "period_end": "Period end",
+        "metric": "Non-GAAP metric",
+        "gaap_label": "Comparable GAAP label",
+        "gaap_display": "Comparable GAAP value",
+        "adjustment_display": "Total adjustments",
+        "non_gaap_label": "Reported non-GAAP label",
+        "non_gaap_display": "Reported non-GAAP value",
+        "unit": "Unit",
+        "scale": "Scale",
+        "confidence": "Parse confidence",
+        "tie_out_status": "Tie-out status",
+        "tie_out_note": "Tie-out note",
+        "source_role": "Source type",
+        "source_page": "PDF page",
+        "source_url": "SEC source",
+    }
+    data = data.rename(columns=rename_map)
+    for column in columns:
+        if column not in data.columns:
+            data[column] = ""
+    return data[columns].sort_values(["Fiscal period", "Non-GAAP metric"], ascending=[False, True]).reset_index(drop=True)
 
 
 def make_metric_matrix(reconciliations: pd.DataFrame, include_gaap: bool = False) -> pd.DataFrame:
