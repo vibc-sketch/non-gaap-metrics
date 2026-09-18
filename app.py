@@ -27,6 +27,7 @@ REQUIRED_ENGINE_API = (
     "compare_adjustment_periods",
     "benchmark_metric_family",
     "make_peer_presence_matrix",
+    "make_peer_adjustment_comparison_matrix",
     "make_reconciliation_bridge_table",
     "make_export_metrics_table",
     "extract_kpi_mentions",
@@ -673,6 +674,20 @@ BCG_OVERRIDE_CSS = """
 }
 
 .stApp { background: var(--bcg-canvas) !important; }
+[data-testid="stHeader"] {
+  height: 3.75rem !important;
+  background: var(--bcg-forest) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.16) !important;
+}
+[data-testid="stHeader"] button,
+[data-testid="stHeader"] [data-testid="stBaseButton-header"] {
+  color: #F1F8F4 !important;
+}
+section.main .block-container,
+[data-testid="stAppViewContainer"] .main .block-container,
+[data-testid="stMainBlockContainer"] {
+  padding-top: 5rem !important;
+}
 .enterprise-topbar {
   background: var(--bcg-forest) !important;
   border-color: rgba(0, 61, 52, 0.18) !important;
@@ -692,7 +707,12 @@ BCG_OVERRIDE_CSS = """
 .app-status-pill::before { background: var(--bcg-green-dark) !important; }
 .source-rule { border-color: #B9D8C8 !important; border-left-color: var(--bcg-green-dark) !important; background: var(--bcg-mint) !important; color: #173C2F !important; }
 
-[data-testid="stSidebar"] { background: var(--bcg-forest) !important; }
+[data-testid="stSidebar"],
+section[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div,
+[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+  background: var(--bcg-forest) !important;
+}
 .sidebar-brand { border-bottom-color: rgba(255,255,255,0.22) !important; }
 .sidebar-brand-title { color: #FFFFFF !important; }
 .sidebar-brand-note { color: #D5E7DF !important; }
@@ -745,6 +765,9 @@ BCG_OVERRIDE_CSS = """
 .bridge-table tr.row-gaap td, .bridge-table tr.row-non-gaap td { background: #EAF5F1 !important; }
 
 @media (max-width: 760px) {
+  section.main .block-container,
+  [data-testid="stAppViewContainer"] .main .block-container,
+  [data-testid="stMainBlockContainer"] { padding-top: 4.5rem !important; }
   .enterprise-topbar { margin-top: 0.2rem !important; }
   .enterprise-meta { color: #C8D8D0 !important; }
 }
@@ -2859,8 +2882,14 @@ with tab_peer:
             key="download_peer_benchmark",
         )
 
-        peer_measure_tab, peer_adjustment_tab, peer_kpi_tab, peer_bridge_tab = st.tabs(
-            ["Non-GAAP measures", "Adjustment types", "Operating KPIs", "Detailed peer bridges"]
+        peer_measure_tab, peer_adjustment_tab, peer_custom_adjustment_tab, peer_kpi_tab, peer_bridge_tab = st.tabs(
+            [
+                "Non-GAAP measures",
+                "Adjustment types",
+                "Custom adjustment matrix",
+                "Operating KPIs",
+                "Detailed peer bridges",
+            ]
         )
 
         with peer_measure_tab:
@@ -2929,6 +2958,98 @@ with tab_peer:
                     "A dot means the adjustment type appeared in at least one parsed reconciliation for that company. "
                     "Counts are disclosure presence, not additive amounts."
                 )
+
+        with peer_custom_adjustment_tab:
+            peer_adjustments = peer_analysis.get("adjustment_history", pd.DataFrame())
+            st.markdown("#### Side-by-side issuer-reported adjustments")
+            st.write(
+                "Select the companies and period view to compare exact issuer adjustment labels and reported values side by side. "
+                "Rows use normalized categories only to organize the comparison; the cells retain the original issuer language."
+            )
+            if peer_adjustments.empty or "company" not in peer_adjustments.columns:
+                st.info("No parsed peer adjustment rows are available for a side-by-side comparison.")
+            else:
+                available_companies = sorted(peer_adjustments["company"].dropna().astype(str).unique().tolist())
+                custom_controls = st.columns([2, 1, 1])
+                with custom_controls[0]:
+                    selected_peer_companies = st.multiselect(
+                        "Companies to compare",
+                        options=available_companies,
+                        default=available_companies,
+                        key="custom_adjustment_companies",
+                        help="The matrix updates to the companies selected here; use the peer tickers field above to add or remove issuers from the analysis set.",
+                    )
+                with custom_controls[1]:
+                    custom_latest_only = st.checkbox(
+                        "Latest fiscal period only",
+                        value=True,
+                        key="custom_adjustment_latest_only",
+                    )
+                with custom_controls[2]:
+                    custom_minimum_peers = st.number_input(
+                        "Minimum peers per category",
+                        min_value=1,
+                        max_value=max(1, len(available_companies)),
+                        value=1,
+                        step=1,
+                        key="custom_adjustment_minimum_peers",
+                    )
+                selected_adjustments = peer_adjustments[
+                    peer_adjustments["company"].astype(str).isin(selected_peer_companies)
+                ].copy()
+                custom_matrix = ng.make_peer_adjustment_comparison_matrix(
+                    selected_adjustments,
+                    latest_period_only=custom_latest_only,
+                    minimum_companies=int(custom_minimum_peers),
+                )
+                if custom_matrix.empty:
+                    st.info("No adjustment categories meet the selected company and period criteria.")
+                else:
+                    period_note = "latest fiscal period available for each company" if custom_latest_only else "all analyzed fiscal periods"
+                    st.caption(
+                        f"Showing {period_note}. Parentheses contain the issuer-reported display value when it was parsed."
+                    )
+                    display_dataframe(
+                        custom_matrix,
+                        height=min(900, 150 + 66 * len(custom_matrix)),
+                    )
+                    st.download_button(
+                        "Download custom adjustment matrix CSV",
+                        data=custom_matrix.to_csv(index=False).encode("utf-8"),
+                        file_name="non_gaap_custom_peer_adjustment_matrix.csv",
+                        mime="text/csv",
+                        key="download_custom_adjustment_matrix",
+                    )
+                    with st.expander("Underlying adjustment source rows", expanded=False):
+                        source_columns = [
+                            column
+                            for column in [
+                                "company",
+                                "period",
+                                "adjustment_category",
+                                "adjustment_label",
+                                "adjustment_display",
+                                "source_role",
+                                "source_url",
+                            ]
+                            if column in selected_adjustments.columns
+                        ]
+                        source_view = selected_adjustments[source_columns].rename(
+                            columns={
+                                "company": "Peer",
+                                "period": "Fiscal period",
+                                "adjustment_category": "Adjustment category",
+                                "adjustment_label": "Issuer adjustment label",
+                                "adjustment_display": "Reported value",
+                                "source_role": "Source type",
+                                "source_url": "SEC source",
+                            }
+                        )
+                        display_dataframe(
+                            source_view,
+                            column_config={"SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")},
+                            height=min(700, 140 + 38 * len(source_view)),
+                        )
 
         with peer_kpi_tab:
             peer_kpis = peer_analysis.get("kpis", pd.DataFrame())

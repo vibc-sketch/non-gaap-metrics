@@ -194,3 +194,53 @@ def test_export_metrics_table_retains_reconciliation_and_source_fields() -> None
             "SEC source": SEC_SOURCE["url"],
         }
     ]
+
+
+def test_peer_adjustment_comparison_matrix_keeps_latest_exact_labels_side_by_side() -> None:
+    adjustments = pd.DataFrame(
+        [
+            {
+                "company": "AAPL",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q2",
+                "period": "FY2026 Q2",
+                "adjustment_category": "Stock-based and equity compensation",
+                "adjustment_label": "Share-based compensation",
+                "adjustment_display": "$8",
+            },
+            {
+                "company": "AAPL",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q3",
+                "period": "FY2026 Q3",
+                "adjustment_category": "Stock-based and equity compensation",
+                "adjustment_label": "Share-based compensation",
+                "adjustment_display": "$12",
+            },
+            {
+                "company": "MSFT",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q4",
+                "period": "FY2026 Q4",
+                "adjustment_category": "Stock-based and equity compensation",
+                "adjustment_label": "Stock-based compensation expense",
+                "adjustment_display": "$7",
+            },
+        ]
+    )
+
+    matrix = ng.make_peer_adjustment_comparison_matrix(
+        adjustments,
+        latest_period_only=True,
+        minimum_companies=2,
+    )
+
+    assert list(matrix.columns) == [
+        "Adjustment category",
+        "Peers disclosing",
+        "AAPL\nFY2026 Q3",
+        "MSFT\nFY2026 Q4",
+    ]
+    assert matrix.iloc[0]["Peers disclosing"] == 2
+    assert matrix.iloc[0]["AAPL\nFY2026 Q3"] == "Share-based compensation ($12)"
+    assert matrix.iloc[0]["MSFT\nFY2026 Q4"] == "Stock-based compensation expense ($7)"

@@ -28,7 +28,7 @@ SEC_ALLOWED_HOSTS = {"sec.gov", "www.sec.gov", "data.sec.gov"}
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
 DEFAULT_CACHE_BYTES = 160 * 1024 * 1024
-APP_VERSION = "6.3.0"
+APP_VERSION = "6.4.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -2825,6 +2825,104 @@ def make_peer_presence_matrix(
     for column in company_columns:
         matrix[column] = matrix[column].map(lambda value: "●" if int(value) else "")
     return matrix
+
+
+def make_peer_adjustment_comparison_matrix(
+    adjustments: pd.DataFrame,
+    company_field: str = "company",
+    latest_period_only: bool = True,
+    minimum_companies: int = 1,
+    maximum_labels_per_cell: int = 3,
+) -> pd.DataFrame:
+    """Build a source-ready, side-by-side peer matrix of issuer-reported adjustments.
+
+    The matrix deliberately retains each issuer's exact adjustment label and reported
+    display value.  Normalized adjustment categories align rows across companies, but
+    they do not assert that the labels or economics are identical.
+    """
+    fixed_columns = ["Adjustment category", "Peers disclosing"]
+    required = {company_field, "adjustment_category", "adjustment_label"}
+    if adjustments is None or adjustments.empty or not required.issubset(adjustments.columns):
+        return pd.DataFrame(columns=fixed_columns)
+
+    data = adjustments.copy()
+    for column in [company_field, "adjustment_category", "adjustment_label", "adjustment_display", "period"]:
+        if column not in data.columns:
+            data[column] = ""
+        data[column] = data[column].map(clean_space)
+    data = data[
+        (data[company_field] != "")
+        & (data["adjustment_category"] != "")
+        & (data["adjustment_label"] != "")
+    ].copy()
+    if data.empty:
+        return pd.DataFrame(columns=fixed_columns)
+
+    if {"fiscal_year", "fiscal_quarter"}.issubset(data.columns):
+        data["_period_rank"] = (
+            pd.to_numeric(data["fiscal_year"], errors="coerce").fillna(0).astype(int) * 10
+            + data["fiscal_quarter"].map(QUARTER_ORDER).fillna(0).astype(int)
+        )
+    elif "period_end" in data.columns:
+        period_dates = pd.to_datetime(data["period_end"], errors="coerce")
+        data["_period_rank"] = period_dates.map(lambda value: int(value.value) if pd.notna(value) else 0)
+    else:
+        data["_period_rank"] = data["period"].rank(method="dense").astype(int)
+
+    companies = sorted(data[company_field].dropna().astype(str).unique().tolist())
+    latest_period_by_company = (
+        data.sort_values([company_field, "_period_rank", "period"])
+        .groupby(company_field, as_index=False)
+        .tail(1)
+        .set_index(company_field)["period"]
+        .to_dict()
+    )
+    if latest_period_only:
+        latest_rank = data.groupby(company_field)["_period_rank"].transform("max")
+        data = data[data["_period_rank"].eq(latest_rank)].copy()
+
+    category_counts = data.groupby("adjustment_category")[company_field].nunique()
+    categories = [
+        category
+        for category in category_counts.index.tolist()
+        if int(category_counts.loc[category]) >= max(1, int(minimum_companies))
+    ]
+    categories = sorted(categories, key=lambda value: (ADJUSTMENT_CATEGORY_ORDER.get(value, 999), value))
+    if not categories:
+        return pd.DataFrame(columns=fixed_columns)
+
+    def cell_value(rows: pd.DataFrame) -> str:
+        items: list[str] = []
+        seen: set[str] = set()
+        sort_columns = [column for column in ["adjustment_order", "adjustment_label"] if column in rows.columns]
+        if sort_columns:
+            rows = rows.sort_values(sort_columns)
+        for _, row in rows.iterrows():
+            label = clean_space(row.get("adjustment_label"))
+            display = clean_space(row.get("adjustment_display"))
+            item = f"{label} ({display})" if display else label
+            if item and item not in seen:
+                items.append(item)
+                seen.add(item)
+        if len(items) > maximum_labels_per_cell:
+            return "\n".join(items[:maximum_labels_per_cell]) + f"\n+{len(items) - maximum_labels_per_cell} more"
+        return "\n".join(items)
+
+    rows: list[dict[str, Any]] = []
+    for category in categories:
+        category_data = data[data["adjustment_category"].eq(category)]
+        row: dict[str, Any] = {
+            "Adjustment category": category,
+            "Peers disclosing": int(category_data[company_field].nunique()),
+        }
+        for company in companies:
+            company_rows = category_data[category_data[company_field].eq(company)]
+            column_name = company
+            if latest_period_only and clean_space(latest_period_by_company.get(company)):
+                column_name = f"{company}\n{latest_period_by_company[company]}"
+            row[column_name] = cell_value(company_rows) if not company_rows.empty else ""
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def make_reconciliation_bridge_table(
