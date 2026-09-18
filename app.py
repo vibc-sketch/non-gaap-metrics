@@ -28,6 +28,7 @@ REQUIRED_ENGINE_API = (
     "benchmark_metric_family",
     "make_peer_presence_matrix",
     "make_peer_adjustment_comparison_matrix",
+    "make_peer_adjustment_trend_matrix",
     "make_reconciliation_bridge_table",
     "make_export_metrics_table",
     "extract_kpi_mentions",
@@ -370,7 +371,7 @@ html, body, [class*="css"], .stApp {
   position: relative;
   top: auto;
   z-index: 100;
-  min-height: 64px;
+  min-height: 74px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -405,11 +406,12 @@ html, body, [class*="css"], .stApp {
 }
 .enterprise-product {
   color: #FFFFFF;
-  font-size: 0.98rem;
+  font-size: clamp(1rem, 1.55vw, 1.3rem);
   font-weight: 700;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
+  letter-spacing: -0.015em;
+  line-height: 1.18;
 }
+.enterprise-product .product-accent { color: #8DE0B9; font-style: italic; }
 .enterprise-meta {
   display: flex;
   align-items: center;
@@ -429,7 +431,7 @@ html, body, [class*="css"], .stApp {
 
 .app-hero {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 1.5rem;
   margin: 0.15rem 0 0.65rem;
@@ -455,6 +457,13 @@ html, body, [class*="css"], .stApp {
   letter-spacing: -0.025em;
 }
 .app-title .accent { color: var(--enterprise-blue) !important; }
+.workspace-heading {
+  color: var(--enterprise-ink);
+  font-size: clamp(1.35rem, 1.8vw, 1.7rem);
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
 .app-subtitle {
   max-width: 880px;
   margin: 0.35rem 0 0.95rem;
@@ -645,13 +654,13 @@ label, [data-testid="stWidgetLabel"] p {
 
 @media (max-width: 760px) {
   .block-container { padding: 0.65rem 0.75rem 2rem !important; }
-  .enterprise-topbar { min-height: 56px; padding: 0.55rem 0.7rem; margin-bottom: 1rem; border-radius: 9px; }
-  .enterprise-product { font-size: 0.86rem; }
+  .enterprise-topbar { min-height: 62px; padding: 0.55rem 0.7rem; margin-bottom: 1rem; border-radius: 9px; }
+  .enterprise-product { font-size: 0.92rem; }
   .enterprise-meta .enterprise-source, .enterprise-meta .divider { display: none; }
   .enterprise-meta { font-size: 0.72rem; }
   .app-hero { align-items: flex-start; flex-direction: column; gap: 0.25rem; }
   .app-status-pill { margin-bottom: 0; }
-  .app-title { font-size: 1.55rem !important; }
+  .workspace-heading { font-size: 1.32rem; }
   .app-subtitle { font-size: 0.92rem; }
   [data-testid="stSidebar"] { min-width: min(86vw, 326px) !important; }
   .info-card, .recon-card { min-height: auto !important; }
@@ -764,12 +773,56 @@ section[data-testid="stSidebar"],
 .bridge-table thead tr.period-head th { background: var(--bcg-green-dark) !important; }
 .bridge-table tr.row-gaap td, .bridge-table tr.row-non-gaap td { background: #EAF5F1 !important; }
 
+/* Streamlit tabs use nested BaseWeb text nodes. Set color on every level and
+   wrap the list so the full navigation row remains visible on narrow canvases. */
+.stTabs [role="tablist"],
+.stTabs [data-baseweb="tab-list"] {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  overflow: visible !important;
+  gap: 0.38rem !important;
+  padding: 0.38rem !important;
+  margin-bottom: 0.85rem !important;
+  border: 1px solid var(--bcg-line) !important;
+  border-radius: 10px !important;
+  background: #FFFFFF !important;
+}
+.stTabs [role="tab"],
+.stTabs [data-baseweb="tab"] {
+  min-height: 2.35rem !important;
+  padding: 0.5rem 0.78rem !important;
+  border: 1px solid transparent !important;
+  border-radius: 7px !important;
+  background: #FFFFFF !important;
+  color: var(--bcg-ink) !important;
+  opacity: 1 !important;
+  font-weight: 700 !important;
+}
+.stTabs [role="tab"] *,
+.stTabs [data-baseweb="tab"] * {
+  color: inherit !important;
+  opacity: 1 !important;
+}
+.stTabs [role="tab"]:not([aria-selected="true"]):hover,
+.stTabs [data-baseweb="tab"]:not([aria-selected="true"]):hover {
+  border-color: #A8D6BE !important;
+  background: var(--bcg-mint) !important;
+}
+.stTabs [role="tab"][aria-selected="true"],
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+  background: var(--bcg-forest) !important;
+  border-color: var(--bcg-forest) !important;
+  color: #FFFFFF !important;
+}
+.stTabs [data-baseweb="tab-highlight"] { display: none !important; }
+
 @media (max-width: 760px) {
   section.main .block-container,
   [data-testid="stAppViewContainer"] .main .block-container,
   [data-testid="stMainBlockContainer"] { padding-top: 4.5rem !important; }
   .enterprise-topbar { margin-top: 0.2rem !important; }
   .enterprise-meta { color: #C8D8D0 !important; }
+  .stTabs [role="tab"], .stTabs [data-baseweb="tab"] { font-size: 0.84rem !important; }
 }
 </style>
 """
@@ -1733,7 +1786,7 @@ st.markdown(
     <div class="enterprise-topbar">
       <div class="enterprise-brand">
         <div class="enterprise-mark"></div>
-        <div class="enterprise-product">SEC Non-GAAP Intelligence</div>
+        <div class="enterprise-product">SEC Non-GAAP <span class="product-accent">Reconciliation</span> &amp; Peer Benchmarking</div>
       </div>
       <div class="enterprise-meta">
         <span class="enterprise-source">Evidence-first filing analysis</span>
@@ -1743,11 +1796,8 @@ st.markdown(
     </div>
     <div class="app-hero">
       <div>
-        <div class="app-kicker">Source-linked financial disclosure research</div>
-        <div class="app-header">
-          <div class="app-mark"></div>
-          <h1 class="app-title">SEC Non-GAAP <span class="accent">Reconciliation</span> &amp; Peer Benchmarking</h1>
-        </div>
+        <div class="app-kicker">Research workspace</div>
+        <div class="workspace-heading">Source-linked financial disclosure research</div>
       </div>
       <div class="app-status-pill">SEC source controlled</div>
     </div>
@@ -3020,6 +3070,39 @@ with tab_peer:
                         mime="text/csv",
                         key="download_custom_adjustment_matrix",
                     )
+                    trend_categories = sorted(
+                        selected_adjustments["adjustment_category"].dropna().astype(str).unique().tolist(),
+                        key=lambda value: (ng.ADJUSTMENT_CATEGORY_ORDER.get(value, 999), value),
+                    )
+                    if trend_categories:
+                        st.markdown("##### Adjustment disclosure trend by peer")
+                        selected_trend_category = st.selectbox(
+                            "Adjustment category to chart",
+                            options=trend_categories,
+                            key="custom_adjustment_trend_category",
+                        )
+                        trend_matrix = ng.make_peer_adjustment_trend_matrix(
+                            selected_adjustments,
+                            selected_trend_category,
+                        )
+                        if not trend_matrix.empty:
+                            st.line_chart(
+                                trend_matrix,
+                                use_container_width=True,
+                                color=chart_series_colors(len(trend_matrix.columns)),
+                            )
+                            disclosure_count = trend_matrix.sum().sort_values(ascending=False).to_frame(
+                                "Fiscal periods disclosing"
+                            )
+                            st.bar_chart(
+                                disclosure_count,
+                                use_container_width=True,
+                                color="#007A55",
+                            )
+                            st.caption(
+                                "Each line uses a binary disclosure-presence flag (1 = the adjustment category appeared in a parsed reconciliation; 0 = not observed). "
+                                "This prevents non-comparable issuer-specific adjustment amounts from being added across companies."
+                            )
                     with st.expander("Underlying adjustment source rows", expanded=False):
                         source_columns = [
                             column

@@ -244,3 +244,38 @@ def test_peer_adjustment_comparison_matrix_keeps_latest_exact_labels_side_by_sid
     assert matrix.iloc[0]["Peers disclosing"] == 2
     assert matrix.iloc[0]["AAPL\nFY2026 Q3"] == "Share-based compensation ($12)"
     assert matrix.iloc[0]["MSFT\nFY2026 Q4"] == "Stock-based compensation expense ($7)"
+
+
+def test_peer_adjustment_trend_matrix_tracks_disclosure_presence_by_period() -> None:
+    adjustments = pd.DataFrame(
+        [
+            {
+                "company": "AAPL",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q2",
+                "period": "FY2026 Q2",
+                "adjustment_category": "Stock-based and equity compensation",
+            },
+            {
+                "company": "AAPL",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q3",
+                "period": "FY2026 Q3",
+                "adjustment_category": "Stock-based and equity compensation",
+            },
+            {
+                "company": "MSFT",
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q3",
+                "period": "FY2026 Q3",
+                "adjustment_category": "Stock-based and equity compensation",
+            },
+        ]
+    )
+
+    matrix = ng.make_peer_adjustment_trend_matrix(adjustments, "Stock-based and equity compensation")
+
+    assert matrix.to_dict("index") == {
+        "FY2026 Q2": {"AAPL": 1, "MSFT": 0},
+        "FY2026 Q3": {"AAPL": 1, "MSFT": 1},
+    }

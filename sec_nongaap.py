@@ -28,7 +28,7 @@ SEC_ALLOWED_HOSTS = {"sec.gov", "www.sec.gov", "data.sec.gov"}
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
 DEFAULT_CACHE_BYTES = 160 * 1024 * 1024
-APP_VERSION = "6.4.0"
+APP_VERSION = "6.5.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -2923,6 +2923,43 @@ def make_peer_adjustment_comparison_matrix(
             row[column_name] = cell_value(company_rows) if not company_rows.empty else ""
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def make_peer_adjustment_trend_matrix(
+    adjustments: pd.DataFrame,
+    adjustment_category: str,
+    company_field: str = "company",
+) -> pd.DataFrame:
+    """Return a fiscal-period x company disclosure-presence matrix for one adjustment category.
+
+    Values are binary disclosure-presence flags.  This intentionally avoids adding
+    dollar values across issuer-specific non-GAAP measures, units, or scales.
+    """
+    if adjustments is None or adjustments.empty:
+        return pd.DataFrame()
+    required = {company_field, "adjustment_category", "period"}
+    if not required.issubset(adjustments.columns):
+        return pd.DataFrame()
+    category = clean_space(adjustment_category)
+    if not category:
+        return pd.DataFrame()
+    data = adjustments.copy()
+    data[company_field] = data[company_field].map(clean_space)
+    data["adjustment_category"] = data["adjustment_category"].map(clean_space)
+    data["period"] = data["period"].map(clean_space)
+    data = data[
+        data["adjustment_category"].eq(category)
+        & data[company_field].ne("")
+        & data["period"].ne("")
+    ].copy()
+    if data.empty:
+        return pd.DataFrame()
+    presence = data[["period", company_field]].drop_duplicates().assign(Disclosed=1)
+    matrix = presence.pivot(index="period", columns=company_field, values="Disclosed").fillna(0).astype(int)
+    order = {period: index for index, period in enumerate(ordered_fiscal_periods(data))}
+    matrix["_period_order"] = [order.get(period, 9999) for period in matrix.index]
+    matrix = matrix.sort_values("_period_order").drop(columns="_period_order")
+    return matrix.reindex(sorted(matrix.columns), axis=1)
 
 
 def make_reconciliation_bridge_table(

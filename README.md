@@ -13,6 +13,7 @@ A Streamlit app that searches public-company issuers and extracts non-GAAP metri
 - Preserve issuer-provided definition and calculation evidence when an exhibit explicitly describes a non-GAAP measure.
 - Build source-linked reconciliation bridges, adjustment histories, peer disclosure matrices, and Excel/CSV exports.
 - Compare selected peer companies in a custom side-by-side adjustment matrix that aligns normalized categories while retaining the issuer's exact labels, values, fiscal periods, and SEC source rows.
+- Chart selected peer adjustment categories as fiscal-period disclosure-presence trends, avoiding aggregation of non-comparable issuer-reported adjustment amounts.
 - Pause and retry automatically when EDGAR returns a rate limit or temporary service error, while recording the recovery or failure in the Source audit log.
 - Flag periods where no matching earnings 8-K or SEC-hosted press-release link was identified, rather than silently returning an empty result.
 - Export extracted records to CSV with direct SEC source links.
