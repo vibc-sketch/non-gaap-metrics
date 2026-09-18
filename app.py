@@ -29,6 +29,8 @@ REQUIRED_ENGINE_API = (
     "make_peer_presence_matrix",
     "make_reconciliation_bridge_table",
     "extract_kpi_mentions",
+    "extract_metric_definitions",
+    "is_sec_resource_url",
 )
 
 
@@ -376,9 +378,67 @@ if st.session_state.get("engine_version") != APP_VERSION:
     st.session_state.engine_version = APP_VERSION
 
 
-@st.cache_resource(show_spinner=False)
 def get_client(contact_email: str) -> ng.SecClient:
-    return ng.SecClient(contact_email=contact_email, app_name=APP_NAME)
+    """Keep the mutable requests session inside one Streamlit browser session."""
+    clients = st.session_state.setdefault("_sec_clients", {})
+    key = (contact_email or "").strip().lower()
+    if key not in clients:
+        clients[key] = ng.SecClient(contact_email=contact_email, app_name=APP_NAME)
+    return clients[key]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_issuer_context(cik: int, _client: ng.SecClient) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame, pd.DataFrame]:
+    """Cache public filing metadata so changes to the interface do not re-download it."""
+    submissions = ng.load_company_submissions(_client, int(cik))
+    company = ng.company_record(submissions)
+    filings = ng.load_all_filings(_client, submissions, years_back=5, max_history_files=5)
+    anchors = ng.build_period_anchors(
+        _client,
+        int(cik),
+        filings,
+        company.get("fiscal_year_end", ""),
+        max_periodic_filings=20,
+    )
+    return company, submissions, filings, anchors
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def analyze_cached_issuer(
+    cik: int,
+    selected_years: tuple[int, ...],
+    max_exhibits: int,
+    filings: pd.DataFrame,
+    anchors: pd.DataFrame,
+    _client: ng.SecClient,
+) -> dict[str, pd.DataFrame]:
+    """Cache completed SEC analysis by issuer, periods, and requested exhibit depth."""
+    return ng.analyze_company_quarters(
+        _client,
+        int(cik),
+        filings,
+        anchors,
+        [int(year) for year in selected_years],
+        max_exhibits_per_8k=int(max_exhibits),
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def analyze_cached_peer(cik: int, max_exhibits: int, _client: ng.SecClient) -> tuple[dict[str, Any], dict[str, pd.DataFrame]]:
+    """Analyze a peer's latest two fiscal years once per cache window."""
+    company, _submissions, filings, anchors = load_issuer_context(int(cik), _client)
+    if anchors.empty:
+        raise ValueError("No recent 10-Q/10-K fiscal-period anchors were found.")
+    years = sorted({int(value) for value in anchors["fiscal_year"].dropna().tolist()}, reverse=True)[:2]
+    analysis = analyze_cached_issuer(
+        int(cik),
+        tuple(years),
+        int(max_exhibits),
+        filings,
+        anchors,
+        _client,
+    )
+    return company, analysis
 
 
 def esc(value: Any) -> str:
@@ -391,6 +451,12 @@ def clean_text(value: Any) -> str:
     if isinstance(value, float) and pd.isna(value):
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def verified_sec_url(value: Any) -> str:
+    """Return a source URL only when it remains an HTTPS SEC-hosted resource."""
+    url = clean_text(value)
+    return url if ng.is_sec_resource_url(url) else ""
 
 
 def format_date(value: Any) -> str:
@@ -734,6 +800,7 @@ def build_excel_export(
         additional = additional[additional["status"].eq("Additional non-GAAP measure")].copy()
     raw_adjustments = analysis.get("adjustments", pd.DataFrame())
     reconciliations = analysis.get("reconciliations", pd.DataFrame())
+    definitions = analysis.get("definitions", pd.DataFrame())
     adjustment_history = analysis.get("adjustment_history", pd.DataFrame())
     if adjustment_history.empty and not raw_adjustments.empty:
         adjustment_history = ng.enrich_adjustments(raw_adjustments, reconciliations)
@@ -778,6 +845,7 @@ def build_excel_export(
         ("Metric matrix", matrix),
         ("Trend analysis", trends),
         ("Reconciliations", reconciliations),
+        ("Metric definitions", definitions),
         ("Presentation bridges", presentation_bridges),
         ("Adjustment history", adjustment_history),
         ("Adjustment matrix", adjustment_matrix),
@@ -1031,6 +1099,32 @@ def source_audit_view(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def definition_view(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+    columns = [
+        "period",
+        "metric",
+        "definition_type",
+        "source_role",
+        "source_document",
+        "source_page",
+        "source_url",
+    ]
+    available = [column for column in columns if column in frame.columns]
+    return frame[available].rename(
+        columns={
+            "period": "Fiscal period",
+            "metric": "Non-GAAP measure",
+            "definition_type": "Evidence type",
+            "source_role": "Source type",
+            "source_document": "Document",
+            "source_page": "PDF page",
+            "source_url": "SEC source",
+        }
+    )
+
+
 def render_bridge_table(
     frame: pd.DataFrame,
     title: str,
@@ -1056,7 +1150,8 @@ def render_bridge_table(
             f'<tr class="{row_class}"><td>{esc(row.get("Line item", ""))}</td>{values}</tr>'
         )
     subtitle_html = f'<div class="small-note" style="margin:0.2rem 0 0.45rem 0;">{esc(subtitle)}</div>' if subtitle else ""
-    link_html = f'<div class="small-note" style="margin-top:0.45rem;"><a href="{esc(source_url)}" target="_blank">Open SEC source exhibit</a></div>' if source_url else ""
+    verified_source = verified_sec_url(source_url)
+    link_html = f'<div class="small-note" style="margin-top:0.45rem;"><a href="{esc(verified_source)}" target="_blank" rel="noopener noreferrer">Open SEC source exhibit</a></div>' if verified_source else ""
     st.markdown(
         f"""
         {subtitle_html}
@@ -1098,6 +1193,7 @@ def combine_peer_results(results: list[tuple[dict[str, Any], dict[str, pd.DataFr
         "adjustment_history",
         "adjustment_tieouts",
         "mentions",
+        "definitions",
         "kpis",
         "sources",
         "evidence",
@@ -1133,30 +1229,9 @@ def analyze_peer_company(
     max_exhibits: int = 6,
 ) -> tuple[dict[str, Any], dict[str, pd.DataFrame]]:
     cik = int(issuer["cik"])
-    submissions = ng.load_company_submissions(client, cik)
-    company_record = ng.company_record(submissions)
-    filings = ng.load_all_filings(client, submissions, years_back=5, max_history_files=5)
-    anchors = ng.build_period_anchors(
-        client,
-        cik,
-        filings,
-        company_record.get("fiscal_year_end", ""),
-        max_periodic_filings=20,
-        progress=progress,
-    )
-    if anchors.empty:
-        raise ValueError("No recent 10-Q/10-K fiscal-period anchors were found.")
-    years = sorted({int(value) for value in anchors["fiscal_year"].dropna().tolist()}, reverse=True)[:2]
-    analysis = ng.analyze_company_quarters(
-        client,
-        cik,
-        filings,
-        anchors,
-        years,
-        progress=progress,
-        max_exhibits_per_8k=max_exhibits,
-    )
-    return company_record, analysis
+    if progress:
+        progress("Loading cached SEC metadata and earnings-exhibit analysis when available...")
+    return analyze_cached_peer(cik, int(max_exhibits), client)
 
 
 def build_measure_presence_source(peer_analysis: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -1293,22 +1368,8 @@ with st.sidebar:
                 try:
                     status = st.status("Loading issuer and fiscal-period metadata...", expanded=True)
                     client = get_client(contact_email.strip())
-                    submissions = ng.load_company_submissions(client, int(selected_cik))
-                    status.update(label="Loading recent filing history...", state="running")
-                    filings = ng.load_all_filings(client, submissions, years_back=5, max_history_files=5)
-
-                    def anchor_progress(message: str) -> None:
-                        status.update(label=message, state="running")
-
-                    company = ng.company_record(submissions)
-                    anchors = ng.build_period_anchors(
-                        client,
-                        int(selected_cik),
-                        filings,
-                        company.get("fiscal_year_end", ""),
-                        max_periodic_filings=20,
-                        progress=anchor_progress,
-                    )
+                    status.update(label="Loading filing history and fiscal-period metadata...", state="running")
+                    company, submissions, filings, anchors = load_issuer_context(int(selected_cik), client)
                     st.session_state.company = company
                     st.session_state.submissions = submissions
                     st.session_state.filings = filings
@@ -1359,18 +1420,14 @@ with st.sidebar:
                 try:
                     status = st.status("Starting 8-K analysis...", expanded=True)
                     client = get_client(contact_email.strip())
-
-                    def analysis_progress(message: str) -> None:
-                        status.update(label=message, state="running")
-
-                    analysis = ng.analyze_company_quarters(
-                        client,
+                    status.update(label="Matching earnings 8-Ks and extracting source evidence...", state="running")
+                    analysis = analyze_cached_issuer(
                         int(st.session_state.loaded_cik),
+                        tuple(sorted(int(year) for year in selected_years)),
+                        int(max_exhibits),
                         st.session_state.filings,
                         st.session_state.anchors,
-                        [int(year) for year in selected_years],
-                        progress=analysis_progress,
-                        max_exhibits_per_8k=int(max_exhibits),
+                        client,
                     )
                     st.session_state.analysis = analysis
                     st.session_state.analysis_years = [int(year) for year in selected_years]
@@ -1472,6 +1529,7 @@ adjustment_tieouts = analysis.get("adjustment_tieouts", pd.DataFrame())
 if adjustment_tieouts.empty and not reconciliations.empty:
     adjustment_tieouts = ng.build_adjustment_tieouts(reconciliations, adjustment_history)
 mentions = analysis.get("mentions", pd.DataFrame())
+definitions = analysis.get("definitions", pd.DataFrame())
 kpis = analysis.get("kpis", pd.DataFrame())
 sources = analysis.get("sources", pd.DataFrame())
 evidence = analysis.get("evidence", pd.DataFrame())
@@ -1540,6 +1598,7 @@ export_payload["adjustment_history"] = adjustment_history
 export_payload["adjustment_category_matrix"] = ng.make_adjustment_metric_matrix(adjustment_history)
 export_payload["adjustment_category_summary"] = ng.adjustment_category_summary(adjustment_history)
 export_payload["adjustment_tieouts"] = adjustment_tieouts
+export_payload["definitions"] = definitions
 excel_bytes = build_excel_export(company, st.session_state.analysis_years, analysis, matrix, trends)
 csv_zip_bytes = ng.build_export_zip(export_payload)
 
@@ -1564,13 +1623,14 @@ with download_columns[2]:
     st.caption("Exports preserve fiscal-period labels, source URLs, parsing evidence, and warnings for review.")
 
 
-tab_bridge, tab_metrics, tab_details, tab_adjustments, tab_additional, tab_peer, tab_sources = st.tabs(
+tab_bridge, tab_metrics, tab_details, tab_adjustments, tab_additional, tab_definitions, tab_peer, tab_sources = st.tabs(
     [
         "Presentation bridges",
         "Quarterly metrics",
         "Reconciliation detail",
         "Adjustment history",
         "Additional measures",
+        "Definitions & method",
         "Peer benchmark",
         "Source audit",
     ]
@@ -2135,7 +2195,63 @@ with tab_additional:
                     f"Source: {row.get('source_role', '')} ({row.get('source_content_type', '')}) | Document: {row.get('source_document', '')}"
                 )
                 if clean_text(row.get("source_url")):
-                    st.markdown(f"[Open source]({row.get('source_url')})")
+                    source_url = verified_sec_url(row.get("source_url"))
+                    if source_url:
+                        st.link_button("Open SEC source", source_url)
+
+with tab_definitions:
+    st.subheader("Issuer-provided non-GAAP definition and calculation evidence")
+    st.write(
+        "This view surfaces the exact text near a measure where the issuer appears to describe, define, or calculate it. "
+        "It does not standardize definitions across companies or infer a definition where the source exhibit does not provide one."
+    )
+    if definitions.empty:
+        st.info(
+            "No definition or calculation language was detected in the selected earnings-exhibit package. "
+            "Use the Source audit tab to review the underlying SEC documents."
+        )
+    else:
+        definition_metrics = sorted(definitions["metric"].dropna().astype(str).unique().tolist())
+        definition_periods = ["Latest available"] + list(reversed(ng.ordered_fiscal_periods(definitions)))
+        definition_filters = st.columns(2)
+        with definition_filters[0]:
+            selected_definition_metric = st.selectbox(
+                "Non-GAAP measure",
+                options=definition_metrics,
+                key="definition_metric_selector",
+            )
+        with definition_filters[1]:
+            selected_definition_period = st.selectbox(
+                "Fiscal period",
+                options=definition_periods,
+                key="definition_period_selector",
+            )
+        definition_records = definitions[definitions["metric"].astype(str).eq(selected_definition_metric)].copy()
+        if selected_definition_period == "Latest available":
+            available_records = definition_records[definition_records["period"].isin(ng.ordered_fiscal_periods(definition_records))]
+            if not available_records.empty:
+                latest_period = ng.ordered_fiscal_periods(available_records)[-1]
+                definition_records = available_records[available_records["period"].eq(latest_period)]
+        else:
+            definition_records = definition_records[definition_records["period"].eq(selected_definition_period)]
+
+        display_dataframe(
+            definition_view(definition_records),
+            column_config={"SEC source": st.column_config.LinkColumn("SEC source", display_text="Open exhibit")},
+            height=min(420, 140 + 36 * len(definition_records)),
+        )
+        for _, row in definition_records.iterrows():
+            page = row.get("source_page")
+            page_label = f" | PDF page {int(page)}" if pd.notna(page) else ""
+            heading = f"{row.get('period', '')} | {row.get('definition_type', '')}{page_label}"
+            with st.expander(heading, expanded=True):
+                st.write(row.get("definition_context", ""))
+                st.caption(
+                    "Source text is presented for review. A detected definition or calculation cue is not a conclusion that the metric is comparable across issuers."
+                )
+                source_url = verified_sec_url(row.get("source_url"))
+                if source_url:
+                    st.link_button("Open SEC source exhibit", source_url, key=f"definition_source_{row.name}")
 
 with tab_peer:
     st.subheader("Peer benchmarking from earnings 8-K exhibit packages")

@@ -6,7 +6,7 @@ import math
 import re
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
@@ -24,9 +24,11 @@ SEC_ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
 SEC_SUBMISSIONS = "https://data.sec.gov/submissions"
 SEC_COMPANY_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 SEC_SIC_LIST = "https://www.sec.gov/search-filings/standard-industrial-classification-sic-code-list"
+SEC_ALLOWED_HOSTS = {"sec.gov", "www.sec.gov", "data.sec.gov"}
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
-APP_VERSION = "6.0.0"
+DEFAULT_CACHE_BYTES = 160 * 1024 * 1024
+APP_VERSION = "6.1.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -49,18 +51,20 @@ class FetchedResource:
 
 
 class SecClient:
-    """Small SEC client with identification, rate limiting, retries, and in-process caching."""
+    """SEC client with identification, rate limiting, retries, and bounded in-process caching."""
 
     def __init__(
         self,
         contact_email: str,
         app_name: str = "SEC Non-GAAP Reconciliation Explorer",
         minimum_interval_seconds: float = 0.12,
+        max_cache_bytes: int = DEFAULT_CACHE_BYTES,
     ) -> None:
         contact_email = (contact_email or "").strip()
         self.contact_email = contact_email
         self.user_agent = f"{app_name}/{APP_VERSION} {contact_email or 'contact-not-configured'}"
         self.minimum_interval_seconds = max(0.11, float(minimum_interval_seconds))
+        self.max_cache_bytes = max(0, int(max_cache_bytes))
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -71,7 +75,8 @@ class SecClient:
         )
         self._last_request_at = 0.0
         self._lock = threading.Lock()
-        self._cache: dict[str, FetchedResource] = {}
+        self._cache: OrderedDict[str, FetchedResource] = OrderedDict()
+        self._cache_bytes = 0
         self._json_cache: dict[str, Any] = {}
 
     @staticmethod
@@ -85,9 +90,33 @@ class SecClient:
                 time.sleep(self.minimum_interval_seconds - elapsed)
             self._last_request_at = time.monotonic()
 
+    def _get_cached_resource(self, url: str) -> Optional[FetchedResource]:
+        with self._lock:
+            resource = self._cache.get(url)
+            if resource is not None:
+                self._cache.move_to_end(url)
+            return resource
+
+    def _cache_resource(self, url: str, resource: FetchedResource) -> None:
+        content_size = len(resource.content)
+        if self.max_cache_bytes <= 0 or content_size > self.max_cache_bytes:
+            return
+        with self._lock:
+            existing = self._cache.pop(url, None)
+            if existing is not None:
+                self._cache_bytes -= len(existing.content)
+            self._cache[url] = resource
+            self._cache_bytes += content_size
+            while self._cache and self._cache_bytes > self.max_cache_bytes:
+                _, evicted = self._cache.popitem(last=False)
+                self._cache_bytes -= len(evicted.content)
+
     def get_bytes(self, url: str, timeout: int = 60) -> FetchedResource:
-        if url in self._cache:
-            return self._cache[url]
+        if not is_sec_resource_url(url):
+            raise ValueError("Only HTTPS SEC resources hosted on sec.gov may be retrieved.")
+        cached = self._get_cached_resource(url)
+        if cached is not None:
+            return cached
 
         last_error: Optional[Exception] = None
         for attempt in range(4):
@@ -99,6 +128,8 @@ class SecClient:
                     time.sleep(wait)
                     continue
                 response.raise_for_status()
+                if not is_sec_resource_url(getattr(response, "url", url) or url):
+                    raise ValueError("SEC resource redirected outside an approved SEC host.")
                 content = response.content
                 if len(content) > MAX_DOCUMENT_BYTES:
                     raise ValueError(
@@ -107,11 +138,9 @@ class SecClient:
                 resource = FetchedResource(
                     content=content,
                     content_type=(response.headers.get("Content-Type") or "").split(";")[0].lower(),
-                    url=response.url,
+                    url=getattr(response, "url", url) or url,
                 )
-                self._cache[url] = resource
-                if response.url != url:
-                    self._cache[response.url] = resource
+                self._cache_resource(url, resource)
                 return resource
             except Exception as exc:  # pragma: no cover - network behavior
                 last_error = exc
@@ -132,20 +161,29 @@ class SecClient:
         return resource.content.decode("utf-8", errors="replace")
 
     def get_json(self, url: str, timeout: int = 60) -> Any:
-        if url in self._json_cache:
-            return self._json_cache[url]
+        with self._lock:
+            cached = self._json_cache.get(url)
+        if cached is not None:
+            return cached
         resource = self.get_bytes(url, timeout=timeout)
         try:
             data = requests.models.complexjson.loads(resource.content.decode("utf-8"))
         except Exception:
             data = requests.models.complexjson.loads(resource.content.decode("utf-8", errors="replace"))
-        self._json_cache[url] = data
+        with self._lock:
+            self._json_cache[url] = data
         return data
 
 
 # ---------------------------------------------------------------------------
 # SEC issuer and filing metadata
 # ---------------------------------------------------------------------------
+
+
+def is_sec_resource_url(url: str) -> bool:
+    """Allow only HTTPS SEC-hosted filing resources in the source audit trail."""
+    parsed = urlparse(clean_space(url))
+    return parsed.scheme == "https" and parsed.hostname in SEC_ALLOWED_HOSTS
 
 
 def clean_space(value: Any) -> str:
@@ -677,7 +715,7 @@ def relevant_exhibits(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "Financial supplement",
             "Other EX-99 exhibit",
         }:
-            if extension in {".htm", ".html", ".txt", ".pdf", ""}:
+            if extension in {".htm", ".html", ".txt", ".pdf", ""} and is_sec_resource_url(document.get("url") or ""):
                 candidates.append(document)
 
     role_rank = {
@@ -2404,6 +2442,81 @@ def extract_metric_mentions(
     return mentions
 
 
+DEFINITION_CUE_PATTERN = re.compile(
+    r"\b(?:defined?\s+as|we\s+(?:define|calculate|use|refer\s+to)|"
+    r"(?:is|are|was|were)\s+(?:defined|calculated|computed)|means|represents|consists\s+of|"
+    r"(?:calculated|computed)\s+(?:by|as)|excludes?|excluding|adjusted\s+(?:for|to)|before)\b",
+    re.I,
+)
+
+
+def _definition_context(text: str, match: re.Match[str]) -> str:
+    """Return the nearest bounded disclosure block around a metric mention."""
+    start_break = text.rfind("\n\n", 0, match.start())
+    end_break = text.find("\n\n", match.end())
+    start = start_break + 2 if start_break >= 0 else max(0, match.start() - 300)
+    end = end_break if end_break >= 0 else min(len(text), match.end() + 900)
+    context = clean_space(text[start:end])
+    if len(context) < 90:
+        context = clean_space(text[max(0, match.start() - 250) : min(len(text), match.end() + 850)])
+    return context[:1800]
+
+
+def extract_metric_definitions(
+    text: str,
+    source: dict[str, Any],
+    source_page: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Extract only source context that appears to define or calculate a non-GAAP measure.
+
+    The returned record is evidence, not a standardized definition.  This distinction
+    prevents a nearby metric mention from being presented as a company definition.
+    """
+    definitions: list[dict[str, Any]] = []
+    original = text or ""
+    for canonical, pattern in METRIC_PATTERNS:
+        candidates: list[dict[str, Any]] = []
+        for match in re.finditer(pattern, original, re.I):
+            context = _definition_context(original, match)
+            cue_matches = list(DEFINITION_CUE_PATTERN.finditer(context))
+            if not cue_matches:
+                continue
+            metric_relative_position = max(0, match.start() - max(0, original.rfind("\n\n", 0, match.start()) + 2))
+            nearest_cue_distance = min(abs(cue.start() - metric_relative_position) for cue in cue_matches)
+            if nearest_cue_distance > 650:
+                continue
+            definition_type = (
+                "Calculation or composition"
+                if re.search(r"defined?\s+as|calculate|computed|consists\s+of|excludes?|excluding|adjusted\s+(?:for|to)|before", context, re.I)
+                else "Non-GAAP characterization"
+            )
+            score = 30 + min(30, len(cue_matches) * 5) + max(0, 30 - nearest_cue_distance // 12)
+            if source.get("role") == "Press release":
+                score += 8
+            candidates.append(
+                {
+                    "metric": canonical,
+                    "definition_type": definition_type,
+                    "definition_context": context,
+                    "definition_score": score,
+                }
+            )
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda item: item["definition_score"])
+        definitions.append(
+            {
+                **best,
+                "source_role": source.get("role") or "EX-99 exhibit",
+                "source_document": source.get("document") or "",
+                "source_description": source.get("description") or "",
+                "source_url": source.get("url") or "",
+                "source_page": source_page,
+            }
+        )
+    return definitions
+
+
 
 
 BENCHMARK_MEASURE_ORDER = [
@@ -2673,9 +2786,11 @@ def parse_exhibit(
             evidence.extend(fallback_evidence)
         reconciled_metrics = {pair["metric"] for pair in pairs}
         mentions: list[dict[str, Any]] = []
+        definitions: list[dict[str, Any]] = []
         kpis: list[dict[str, Any]] = []
         for page_number, page_text in enumerate(pages, start=1):
             mentions.extend(extract_metric_mentions(page_text, exhibit, reconciled_metrics, source_page=page_number))
+            definitions.extend(extract_metric_definitions(page_text, exhibit, source_page=page_number))
             kpis.extend(extract_kpi_mentions(page_text, exhibit, source_page=page_number))
         document_type = "PDF"
     else:
@@ -2696,6 +2811,7 @@ def parse_exhibit(
             )
         reconciled_metrics = {pair["metric"] for pair in pairs}
         mentions = extract_metric_mentions(full_text, exhibit, reconciled_metrics)
+        definitions = extract_metric_definitions(full_text, exhibit)
         kpis = extract_kpi_mentions(full_text, exhibit)
         document_type = "HTML"
 
@@ -2710,6 +2826,7 @@ def parse_exhibit(
         "reconciliations": pairs,
         "adjustments": adjustments,
         "mentions": mentions,
+        "definitions": definitions,
         "kpis": kpis,
         "evidence": evidence,
         "warnings": warnings,
@@ -2739,6 +2856,7 @@ def analyze_company_quarters(
     reconciliation_rows: list[dict[str, Any]] = []
     adjustment_rows: list[dict[str, Any]] = []
     mention_rows: list[dict[str, Any]] = []
+    definition_rows: list[dict[str, Any]] = []
     kpi_rows: list[dict[str, Any]] = []
     source_rows: list[dict[str, Any]] = []
     evidence_rows: list[dict[str, Any]] = []
@@ -2866,6 +2984,16 @@ def analyze_company_quarters(
                         **item,
                     }
                 )
+            for item in parsed.get("definitions", []):
+                definition_rows.append(
+                    {
+                        "fiscal_year": fy,
+                        "fiscal_quarter": quarter,
+                        "period": period_label,
+                        "period_end": anchor.get("period_end"),
+                        **dict(item),
+                    }
+                )
             for item in parsed.get("kpis", []):
                 kpi_rows.append(
                     {
@@ -2916,6 +3044,7 @@ def analyze_company_quarters(
     reconciliations_df = pd.DataFrame(reconciliation_rows)
     adjustments_df = pd.DataFrame(adjustment_rows)
     mentions_df = pd.DataFrame(mention_rows)
+    definitions_df = pd.DataFrame(definition_rows)
     kpis_df = pd.DataFrame(kpi_rows)
     sources_df = pd.DataFrame(source_rows)
     evidence_df = pd.DataFrame(evidence_rows)
@@ -2981,6 +3110,16 @@ def analyze_company_quarters(
             ["fiscal_year", "fiscal_quarter", "metric", "source_url", "source_page"], keep="first"
         )
 
+    if not definitions_df.empty:
+        role_rank = {"Press release": 0, "Financial supplement": 1, "Investor presentation": 2, "Other EX-99 exhibit": 3}
+        definitions_df["role_rank"] = definitions_df["source_role"].map(role_rank).fillna(9)
+        definitions_df = definitions_df.sort_values(
+            ["fiscal_year", "fiscal_quarter", "metric", "definition_score", "role_rank"],
+            ascending=[False, False, True, False, True],
+        ).drop_duplicates(
+            ["fiscal_year", "fiscal_quarter", "metric"], keep="first"
+        ).drop(columns=["role_rank"]).reset_index(drop=True)
+
     if not kpis_df.empty:
         kpis_df = kpis_df.drop_duplicates(
             ["fiscal_year", "fiscal_quarter", "kpi", "source_url", "source_page"], keep="first"
@@ -2998,6 +3137,7 @@ def analyze_company_quarters(
         "adjustment_history": adjustment_history_df,
         "adjustment_tieouts": adjustment_tieouts_df,
         "mentions": mentions_df,
+        "definitions": definitions_df,
         "kpis": kpis_df,
         "sources": sources_df,
         "evidence": evidence_df,
