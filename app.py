@@ -921,13 +921,68 @@ html { color-scheme: light !important; }
 
 [data-testid="stHeader"] {
   height: 3.75rem !important;
-  background: rgba(255, 255, 255, 0.96) !important;
-  border-bottom: 1px solid var(--apple-line) !important;
-  backdrop-filter: blur(18px) saturate(180%);
+  background: #E5E5EA !important;
+  border-top: 1px solid #636366 !important;
+  border-bottom: 1px solid #AEAEB2 !important;
+  color: #1D1D1F !important;
+  backdrop-filter: none !important;
 }
 [data-testid="stHeader"] button,
 [data-testid="stHeader"] [data-testid="stBaseButton-header"] {
-  color: var(--apple-ink) !important;
+  background: #F5F5F7 !important;
+  color: #1D1D1F !important;
+  border: 1px solid #AEAEB2 !important;
+  border-radius: 7px !important;
+  opacity: 1 !important;
+}
+[data-testid="stHeader"] button:hover,
+[data-testid="stHeader"] [data-testid="stBaseButton-header"]:hover {
+  background: #D1D1D6 !important;
+  border-color: #636366 !important;
+  color: #000000 !important;
+}
+[data-testid="stHeader"] button *,
+[data-testid="stHeader"] [data-testid="stBaseButton-header"] *,
+[data-testid="stHeader"] svg,
+[data-testid="stHeader"] svg *,
+[data-testid="stHeader"] [data-testid="stIconMaterial"],
+[data-testid="stToolbar"] *,
+[data-testid="stMainMenu"] * {
+  color: #1D1D1F !important;
+  fill: currentColor !important;
+  stroke: currentColor !important;
+  opacity: 1 !important;
+}
+[data-testid="stToolbar"],
+[data-testid="stMainMenu"],
+[data-testid="stHeaderActionElements"],
+[data-testid="stSidebarCollapsedControl"] {
+  background: transparent !important;
+  color: #1D1D1F !important;
+  opacity: 1 !important;
+}
+[data-testid="stSidebarCollapsedControl"] button {
+  background: #D1D1D6 !important;
+  color: #1D1D1F !important;
+  border: 1px solid #8E8E93 !important;
+}
+[data-testid="stSidebarCollapsedControl"] button svg,
+[data-testid="stSidebarCollapsedControl"] button svg *,
+[data-testid="stSidebarCollapseButton"] button svg,
+[data-testid="stSidebarCollapseButton"] button svg *,
+[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button svg,
+[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button svg * {
+  color: #1D1D1F !important;
+  fill: #1D1D1F !important;
+  stroke: #1D1D1F !important;
+  opacity: 1 !important;
+}
+[data-testid="stSidebarCollapseButton"] button,
+[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] button {
+  background: #D1D1D6 !important;
+  color: #1D1D1F !important;
+  border: 1px solid #8E8E93 !important;
+  opacity: 1 !important;
 }
 
 .enterprise-topbar {
