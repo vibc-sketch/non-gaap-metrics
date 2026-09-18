@@ -102,6 +102,50 @@ def test_sec_client_evicts_old_documents_from_bounded_cache() -> None:
     assert client._cache_bytes == len(two.content)
 
 
+def test_sec_client_records_and_raises_after_rate_limit_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RateLimitedResponse:
+        status_code = 429
+        headers = {"Retry-After": "0"}
+        url = SEC_SOURCE["url"]
+
+    client = ng.SecClient("research@example.com")
+    monkeypatch.setattr(client.session, "get", lambda *_args, **_kwargs: RateLimitedResponse())
+    monkeypatch.setattr(ng.time, "sleep", lambda *_args: None)
+
+    with pytest.raises(ng.SecRateLimitError):
+        client.get_bytes(SEC_SOURCE["url"])
+
+    events = client.request_events_frame()
+    assert len(events) == 4
+    assert set(events["category"]) == {"SEC EDGAR rate limit"}
+    assert events.iloc[-1]["severity"] == "Error"
+    assert events.iloc[-1]["status_code"] == 429
+
+
+def test_missing_earnings_release_is_a_warning_and_request_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ng.SecClient("research@example.com")
+    anchors = pd.DataFrame(
+        [
+            {
+                "fiscal_year": 2026,
+                "fiscal_quarter": "Q2",
+                "period_end": "2026-06-30",
+                "periodic_form": "10-Q",
+                "periodic_filing_date": "2026-08-01",
+                "periodic_document": "quarterly.htm",
+                "periodic_url": SEC_SOURCE["url"],
+            }
+        ]
+    )
+    monkeypatch.setattr(ng, "match_earnings_8k", lambda *_args, **_kwargs: None)
+
+    analysis = ng.analyze_company_quarters(client, 1, pd.DataFrame(), anchors, [2026])
+
+    assert analysis["coverage"].iloc[0]["status"] == "No matching earnings 8-K found"
+    assert analysis["warnings"].iloc[0]["warning_category"] == "Missing earnings release"
+    assert analysis["request_events"].iloc[0]["category"] == "Missing earnings release"
+
+
 def test_export_metrics_table_retains_reconciliation_and_source_fields() -> None:
     reconciliations = pd.DataFrame(
         [

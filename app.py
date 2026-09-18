@@ -61,15 +61,15 @@ CUSTOM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap');
 
 :root {
-  --dl-green: #86BC25;
-  --dl-green-dark: #6B991E;
-  --dl-neon-green: #86EB22;
-  --dl-blue: #00A3E0;
-  --dl-blue-dark: #005587;
-  --dl-dark-gray: #282728;
-  --dl-text-secondary: #5A5A5A;
-  --dl-border: #E2E2E2;
-  --dl-bg-page: #FAFAFA;
+  --dl-green: #00A86B;
+  --dl-green-dark: #007A55;
+  --dl-neon-green: #80D4B1;
+  --dl-blue: #006F8E;
+  --dl-blue-dark: #005A73;
+  --dl-dark-gray: #1D2B27;
+  --dl-text-secondary: #52635C;
+  --dl-border: #C9D8D0;
+  --dl-bg-page: #F5F7F5;
   --dl-bg-card: #FFFFFF;
   --dl-amber: #E8A317;
   --dl-red: #DA291C;
@@ -366,8 +366,8 @@ html, body, [class*="css"], .stApp {
 
 /* Persistent product bar keeps product identity available when navigation is collapsed. */
 .enterprise-topbar {
-  position: sticky;
-  top: 0.35rem;
+  position: relative;
+  top: auto;
   z-index: 100;
   min-height: 64px;
   display: flex;
@@ -658,7 +658,99 @@ label, [data-testid="stWidgetLabel"] p {
 }
 </style>
 """
-st.html(CUSTOM_CSS + ENTERPRISE_CSS)
+BCG_OVERRIDE_CSS = """
+<style>
+:root {
+  --bcg-green: #00A86B;
+  --bcg-green-dark: #007A55;
+  --bcg-forest: #003D34;
+  --bcg-ink: #1D2B27;
+  --bcg-muted: #52635C;
+  --bcg-canvas: #F5F7F5;
+  --bcg-mint: #E8F5EE;
+  --bcg-line: #C9D8D0;
+  --bcg-blue: #006F8E;
+}
+
+.stApp { background: var(--bcg-canvas) !important; }
+.enterprise-topbar {
+  background: var(--bcg-forest) !important;
+  border-color: rgba(0, 61, 52, 0.18) !important;
+  box-shadow: 0 8px 20px rgba(0, 61, 52, 0.14) !important;
+}
+.enterprise-mark { background: conic-gradient(from 210deg, var(--bcg-green), #80D4B1, #00A3D7, var(--bcg-green)) !important; }
+.enterprise-mark::after { background: var(--bcg-forest) !important; }
+.enterprise-product { color: #FFFFFF !important; }
+.enterprise-meta, .enterprise-byline { color: #C8D8D0 !important; }
+.enterprise-meta .divider { color: #7FA395 !important; }
+.app-kicker, .app-title .accent { color: var(--bcg-green-dark) !important; }
+.app-title, h1, h2, h3, h4 { color: var(--bcg-ink) !important; }
+.app-header .app-mark { background: conic-gradient(from 210deg, var(--bcg-green-dark), #78CB98, var(--bcg-blue), var(--bcg-green-dark)) !important; }
+.app-header .app-mark::after { background: var(--bcg-canvas) !important; }
+.app-subtitle, .info-label, .recon-card .label, .info-note, .small-note { color: var(--bcg-muted) !important; }
+.app-status-pill { border-color: #A8D6BE !important; background: var(--bcg-mint) !important; color: #14543A !important; }
+.app-status-pill::before { background: var(--bcg-green-dark) !important; }
+.source-rule { border-color: #B9D8C8 !important; border-left-color: var(--bcg-green-dark) !important; background: var(--bcg-mint) !important; color: #173C2F !important; }
+
+[data-testid="stSidebar"] { background: var(--bcg-forest) !important; }
+.sidebar-brand { border-bottom-color: rgba(255,255,255,0.22) !important; }
+.sidebar-brand-title { color: #FFFFFF !important; }
+.sidebar-brand-note { color: #D5E7DF !important; }
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] span {
+  color: #F1F8F4 !important;
+  opacity: 1 !important;
+}
+[data-testid="stSidebar"] [data-testid="stTextInput"] input,
+[data-testid="stSidebar"] [data-testid="stTextArea"] textarea,
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="input"] > div {
+  border: 1px solid #D4E4DC !important;
+  box-shadow: none !important;
+}
+[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button,
+[data-testid="stSidebar"] .stButton button[kind="primary"],
+[data-testid="stSidebar"] [data-testid="stBaseButton-primary"] {
+  background: var(--bcg-green) !important;
+  border-color: var(--bcg-green) !important;
+  color: #FFFFFF !important;
+}
+[data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stSidebar"] .stButton button[kind="primary"]:hover,
+[data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:hover {
+  background: var(--bcg-green-dark) !important;
+  border-color: var(--bcg-green-dark) !important;
+  color: #FFFFFF !important;
+}
+
+.stButton button[kind="primary"], [data-testid="stBaseButton-primary"] { background: var(--bcg-green-dark) !important; border-color: var(--bcg-green-dark) !important; }
+.stButton button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover { background: #005C40 !important; border-color: #005C40 !important; }
+.stButton button:hover, .stDownloadButton button:hover { border-color: var(--bcg-green-dark) !important; background: var(--bcg-mint) !important; }
+.info-card { border-top-color: var(--bcg-green-dark) !important; border-color: var(--bcg-line) !important; }
+.recon-card { border-left-color: var(--bcg-green-dark) !important; border-color: var(--bcg-line) !important; }
+.success-note { background: var(--bcg-mint) !important; border-left-color: var(--bcg-green-dark) !important; color: #174B36 !important; }
+.warning-note { background: #FFF5DD !important; border-left-color: #B7791F !important; color: #6C4806 !important; }
+.peer-note { background: #EAF5F1 !important; border-left-color: var(--bcg-green-dark) !important; color: #174B36 !important; }
+.stTabs [aria-selected="true"] { color: var(--bcg-green-dark) !important; }
+.stTabs [data-baseweb="tab-highlight"] { background-color: var(--bcg-green-dark) !important; }
+.bridge-table thead tr.company-head th { background: var(--bcg-forest) !important; }
+.bridge-table thead tr.period-head th { background: var(--bcg-green-dark) !important; }
+.bridge-table tr.row-gaap td, .bridge-table tr.row-non-gaap td { background: #EAF5F1 !important; }
+
+@media (max-width: 760px) {
+  .enterprise-topbar { margin-top: 0.2rem !important; }
+  .enterprise-meta { color: #C8D8D0 !important; }
+}
+</style>
+"""
+st.html(CUSTOM_CSS + ENTERPRISE_CSS + BCG_OVERRIDE_CSS)
 
 if ENGINE_API_MISSING:
     loaded_path = getattr(ng, "__file__", "unknown module path")
@@ -936,23 +1028,23 @@ def chart_frame(trends: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str]:
     return selected[["period", "chart_value"]].set_index("period"), unit_label
 
 
-DELOITTE_CHART_SEQUENCE = [
-    "#86BC25",  # Deloitte Green (primary, always first)
-    "#00A3E0",  # Blue
-    "#282728",  # Dark Gray
-    "#86EB22",  # Neon Green
-    "#A0DCFF",  # Light Blue
-    "#005587",  # Blue Dark
-    "#B7E320",  # Bright Lime
-    "#63C631",  # Green
+BCG_CHART_SEQUENCE = [
+    "#007A55",  # Deep green
+    "#006F8E",  # Teal blue
+    "#003D34",  # Forest
+    "#00A86B",  # Bright green
+    "#5BBF9A",  # Mint
+    "#365E55",  # Slate green
+    "#4B8FA3",  # Muted blue
+    "#8EBEAA",  # Pale green
 ]
 
 
 def chart_series_colors(column_count: int) -> list[str]:
-    """Deloitte's brand chart color sequence, one color per series, cycled if needed."""
+    """BCG-inspired chart colors, one color per series and cycled if needed."""
     if column_count <= 0:
         return []
-    return [DELOITTE_CHART_SEQUENCE[index % len(DELOITTE_CHART_SEQUENCE)] for index in range(column_count)]
+    return [BCG_CHART_SEQUENCE[index % len(BCG_CHART_SEQUENCE)] for index in range(column_count)]
 
 
 def display_dataframe(
@@ -989,11 +1081,11 @@ def excel_ready(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def style_data_sheet(worksheet: Any, header_row: int = 1) -> None:
-    dark_fill = PatternFill("solid", fgColor="1F4E78")
-    light_fill = PatternFill("solid", fgColor="D9EAF7")
+    dark_fill = PatternFill("solid", fgColor="003D34")
+    light_fill = PatternFill("solid", fgColor="E8F5EE")
     header_font = Font(color="FFFFFF", bold=True)
-    link_font = Font(color="0563C1", underline="single")
-    thin_border = Border(bottom=Side(style="thin", color="9EADBA"))
+    link_font = Font(color="007A55", underline="single")
+    thin_border = Border(bottom=Side(style="thin", color="B8D2C4"))
 
     worksheet.sheet_view.showGridLines = False
     worksheet.freeze_panes = f"A{header_row + 1}"
@@ -1019,7 +1111,7 @@ def style_data_sheet(worksheet: Any, header_row: int = 1) -> None:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             if row_index % 2 == 0:
                 cell.fill = light_fill
-            if "url" in header and value.startswith("http"):
+            if value.startswith("http"):
                 cell.hyperlink = value
                 cell.font = link_font
         worksheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_length + 2, 12), 55)
@@ -1185,6 +1277,7 @@ def build_excel_export(
         ("Coverage", analysis.get("coverage", pd.DataFrame())),
         ("Source audit", analysis.get("sources", pd.DataFrame())),
         ("Evidence", analysis.get("evidence", pd.DataFrame())),
+        ("SEC request log", analysis.get("request_events", pd.DataFrame())),
         ("Warnings", analysis.get("warnings", pd.DataFrame())),
     ]
 
@@ -1528,6 +1621,7 @@ def combine_peer_results(results: list[tuple[dict[str, Any], dict[str, pd.DataFr
         "sources",
         "evidence",
         "warnings",
+        "request_events",
     }
     combined: dict[str, pd.DataFrame] = {}
     for key in keys:
@@ -1890,6 +1984,7 @@ kpis = analysis.get("kpis", pd.DataFrame())
 sources = analysis.get("sources", pd.DataFrame())
 evidence = analysis.get("evidence", pd.DataFrame())
 warnings = analysis.get("warnings", pd.DataFrame())
+request_events = analysis.get("request_events", pd.DataFrame())
 trends = add_change_columns(reconciliations)
 matrix = ng.make_metric_matrix(reconciliations, include_gaap=False)
 additional = (
@@ -2122,7 +2217,7 @@ with tab_metrics:
             selected_metric = st.selectbox("Select a metric", options=metric_options, key="metric_trend_selector")
             trend_chart, chart_unit = chart_frame(trends, selected_metric)
             if not trend_chart.empty:
-                st.line_chart(trend_chart, use_container_width=True, color="#86BC25")
+                st.line_chart(trend_chart, use_container_width=True, color="#007A55")
                 st.caption(f"Chart unit: {chart_unit}. The chart follows issuer fiscal-quarter order, not calendar-quarter order.")
 
 with tab_details:
@@ -2794,7 +2889,7 @@ with tab_peer:
                     measure_matrix_all, "Number of non-GAAP measures"
                 )
                 st.markdown("##### Peers by number of non-GAAP measure disclosures")
-                st.bar_chart(measure_counts, use_container_width=True, color="#86BC25")
+                st.bar_chart(measure_counts, use_container_width=True, color="#007A55")
 
         with peer_adjustment_tab:
             peer_adjustments = peer_analysis.get("adjustment_history", pd.DataFrame())
@@ -2829,7 +2924,7 @@ with tab_peer:
                         adjustment_matrix_peer_all, "Number of adjustment types"
                     )
                     st.markdown("##### Peers by number of non-GAAP adjustment types")
-                    st.bar_chart(adjustment_counts, use_container_width=True, color="#86BC25")
+                    st.bar_chart(adjustment_counts, use_container_width=True, color="#007A55")
                 st.caption(
                     "A dot means the adjustment type appeared in at least one parsed reconciliation for that company. "
                     "Counts are disclosure presence, not additive amounts."
@@ -2860,7 +2955,7 @@ with tab_peer:
                 if not kpi_matrix.empty:
                     kpi_counts = peer_company_count_frame(kpi_matrix_all, "Number of KPIs")
                     st.markdown("##### Peers by number of KPI disclosures")
-                    st.bar_chart(kpi_counts, use_container_width=True, color="#86BC25")
+                    st.bar_chart(kpi_counts, use_container_width=True, color="#007A55")
                 with st.expander("KPI source context", expanded=False):
                     kpi_columns = [
                         column
@@ -2996,6 +3091,31 @@ with tab_sources:
         else:
             display_dataframe(warning_view)
         st.caption("Image-only PDFs are flagged because this version does not perform OCR. Review the linked presentation manually when that warning appears.")
+
+    st.subheader("SEC request resilience log")
+    if request_events.empty:
+        st.success("No SEC rate-limit, temporary-service, missing-release, or blocked-source events were recorded for this analysis.")
+    else:
+        request_log = request_events.rename(
+            columns={
+                "timestamp_utc": "UTC time",
+                "category": "Event",
+                "severity": "Severity",
+                "status_code": "HTTP status",
+                "attempt": "Attempt",
+                "retry_after_seconds": "Retry delay (seconds)",
+                "url": "SEC source",
+                "message": "Action taken",
+            }
+        )
+        display_dataframe(
+            request_log,
+            column_config={"SEC source": st.column_config.LinkColumn("SEC source", display_text="Open source")},
+            height=min(520, 140 + 38 * len(request_log)),
+        )
+        st.caption(
+            "EDGAR rate limits and temporary service errors are paused and retried automatically. Missing release links are logged for review rather than treated as a silent no-result."
+        )
 
     with st.expander("Methodology and limitations", expanded=False):
         st.markdown(

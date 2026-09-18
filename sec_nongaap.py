@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable, Optional
@@ -28,7 +28,7 @@ SEC_ALLOWED_HOSTS = {"sec.gov", "www.sec.gov", "data.sec.gov"}
 
 MAX_DOCUMENT_BYTES = 35 * 1024 * 1024
 DEFAULT_CACHE_BYTES = 160 * 1024 * 1024
-APP_VERSION = "6.2.0"
+APP_VERSION = "6.3.0"
 
 QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 QUARTER_NAMES = {
@@ -48,6 +48,10 @@ class FetchedResource:
     content: bytes
     content_type: str
     url: str
+
+
+class SecRateLimitError(RuntimeError):
+    """Raised after EDGAR continues to return HTTP 429 after automatic retries."""
 
 
 class SecClient:
@@ -78,6 +82,7 @@ class SecClient:
         self._cache: OrderedDict[str, FetchedResource] = OrderedDict()
         self._cache_bytes = 0
         self._json_cache: dict[str, Any] = {}
+        self._request_events: list[dict[str, Any]] = []
 
     @staticmethod
     def valid_contact(contact_email: str) -> bool:
@@ -111,8 +116,67 @@ class SecClient:
                 _, evicted = self._cache.popitem(last=False)
                 self._cache_bytes -= len(evicted.content)
 
+    def _record_event(
+        self,
+        category: str,
+        severity: str,
+        url: str,
+        message: str,
+        status_code: Optional[int] = None,
+        attempt: Optional[int] = None,
+        retry_after_seconds: Optional[float] = None,
+    ) -> None:
+        event = {
+            "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "category": category,
+            "severity": severity,
+            "status_code": status_code,
+            "attempt": attempt,
+            "retry_after_seconds": retry_after_seconds,
+            "url": url,
+            "message": message,
+        }
+        with self._lock:
+            self._request_events.append(event)
+            if len(self._request_events) > 250:
+                del self._request_events[:-250]
+
+    def request_events_frame(self) -> pd.DataFrame:
+        """Return request failures and automatic recovery events for the source audit."""
+        columns = [
+            "timestamp_utc",
+            "category",
+            "severity",
+            "status_code",
+            "attempt",
+            "retry_after_seconds",
+            "url",
+            "message",
+        ]
+        with self._lock:
+            events = list(self._request_events)
+        return pd.DataFrame(events, columns=columns)
+
+    def request_event_count(self) -> int:
+        with self._lock:
+            return len(self._request_events)
+
+    @staticmethod
+    def _retry_delay(response: Any, attempt: int) -> float:
+        retry_after = clean_space((getattr(response, "headers", {}) or {}).get("Retry-After"))
+        try:
+            return min(60.0, max(0.0, float(retry_after)))
+        except (TypeError, ValueError):
+            return min(8.0, 0.8 * (2**attempt))
+
     def get_bytes(self, url: str, timeout: int = 60) -> FetchedResource:
         if not is_sec_resource_url(url):
+            self._record_event(
+                "Blocked source URL",
+                "Error",
+                url,
+                "Blocked a non-HTTPS or non-SEC document URL before making a request.",
+            )
             raise ValueError("Only HTTPS SEC resources hosted on sec.gov may be retrieved.")
         cached = self._get_cached_resource(url)
         if cached is not None:
@@ -123,12 +187,47 @@ class SecClient:
             try:
                 self._wait_for_slot()
                 response = self.session.get(url, timeout=timeout, allow_redirects=True)
-                if response.status_code in {429, 500, 502, 503, 504}:
-                    wait = min(8.0, 0.8 * (2**attempt))
+                status_code = int(getattr(response, "status_code", 0) or 0)
+                if status_code == 429:
+                    wait = self._retry_delay(response, attempt)
+                    last_error = SecRateLimitError(
+                        "SEC EDGAR rate-limited this request. The app paused and retried automatically."
+                    )
+                    self._record_event(
+                        "SEC EDGAR rate limit",
+                        "Warning" if attempt < 3 else "Error",
+                        url,
+                        "EDGAR returned HTTP 429; automatic retry scheduled." if attempt < 3 else "EDGAR continued to return HTTP 429 after automatic retries.",
+                        status_code=status_code,
+                        attempt=attempt + 1,
+                        retry_after_seconds=wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                if status_code in {500, 502, 503, 504}:
+                    wait = self._retry_delay(response, attempt)
+                    last_error = requests.HTTPError(f"SEC returned HTTP {status_code} after a temporary service failure.")
+                    self._record_event(
+                        "SEC temporary service error",
+                        "Warning" if attempt < 3 else "Error",
+                        url,
+                        f"SEC returned HTTP {status_code}; automatic retry scheduled." if attempt < 3 else f"SEC continued to return HTTP {status_code} after automatic retries.",
+                        status_code=status_code,
+                        attempt=attempt + 1,
+                        retry_after_seconds=wait,
+                    )
                     time.sleep(wait)
                     continue
                 response.raise_for_status()
                 if not is_sec_resource_url(getattr(response, "url", url) or url):
+                    self._record_event(
+                        "Blocked redirect",
+                        "Error",
+                        getattr(response, "url", url) or url,
+                        "SEC document request redirected outside an approved SEC host.",
+                        status_code=status_code,
+                        attempt=attempt + 1,
+                    )
                     raise ValueError("SEC resource redirected outside an approved SEC host.")
                 content = response.content
                 if len(content) > MAX_DOCUMENT_BYTES:
@@ -144,6 +243,14 @@ class SecClient:
                 return resource
             except Exception as exc:  # pragma: no cover - network behavior
                 last_error = exc
+                if attempt == 3:
+                    self._record_event(
+                        "SEC request failure",
+                        "Error",
+                        url,
+                        f"SEC request failed after automatic retries: {clean_space(exc)}",
+                        attempt=attempt + 1,
+                    )
                 if attempt < 3:
                     time.sleep(min(8.0, 0.8 * (2**attempt)))
 
@@ -2914,6 +3021,7 @@ def analyze_company_quarters(
     progress: Optional[Callable[[str], None]] = None,
     max_exhibits_per_8k: int = 8,
 ) -> dict[str, pd.DataFrame]:
+    request_event_start = client.request_event_count()
     selected = anchors[anchors["fiscal_year"].isin(selected_years)].copy()
     selected["quarter_order"] = selected["fiscal_quarter"].map(QUARTER_ORDER)
     selected = selected.sort_values(["fiscal_year", "quarter_order"], ascending=[True, True])
@@ -2958,11 +3066,54 @@ def analyze_company_quarters(
         }
 
         if not matched:
+            missing_message = (
+                f"No matching earnings Item 2.02 8-K or SEC-hosted press-release exhibit was found for {period_label}. "
+                "Review the anchor filing and company investor-relations release manually."
+            )
+            client._record_event(
+                "Missing earnings release",
+                "Warning",
+                clean_space(anchor.get("periodic_url")),
+                missing_message,
+            )
+            warning_rows.append(
+                {
+                    "fiscal_year": fy,
+                    "fiscal_quarter": quarter,
+                    "period": period_label,
+                    "source_document": clean_space(anchor.get("periodic_document")),
+                    "source_url": clean_space(anchor.get("periodic_url")),
+                    "warning_category": "Missing earnings release",
+                    "warning": missing_message,
+                }
+            )
             coverage_rows.append(coverage)
             continue
 
         parsed_documents: list[dict[str, Any]] = []
         exhibits = matched.get("exhibits") or []
+        if not exhibits:
+            missing_message = (
+                f"Matched earnings 8-K for {period_label}, but no SEC-hosted PDF, HTML, text, or EX-99 press-release document was discovered. "
+                "Review the 8-K filing index and primary-document links manually."
+            )
+            client._record_event(
+                "Missing press-release link",
+                "Warning",
+                clean_space(matched.get("index_url")),
+                missing_message,
+            )
+            warning_rows.append(
+                {
+                    "fiscal_year": fy,
+                    "fiscal_quarter": quarter,
+                    "period": period_label,
+                    "source_document": clean_space(matched.get("primary_document")),
+                    "source_url": clean_space(matched.get("index_url")),
+                    "warning_category": "Missing press-release link",
+                    "warning": missing_message,
+                }
+            )
         for exhibit in exhibits[:max_exhibits_per_8k]:
             if progress:
                 progress(f"Reading {period_label}: {exhibit.get('role')} ({exhibit.get('document')})...")
@@ -3116,6 +3267,7 @@ def analyze_company_quarters(
     sources_df = pd.DataFrame(source_rows)
     evidence_df = pd.DataFrame(evidence_rows)
     warnings_df = pd.DataFrame(warning_rows)
+    request_events_df = client.request_events_frame().iloc[request_event_start:].reset_index(drop=True)
 
     if not reconciliations_df.empty:
         reconciliations_df["metric_family"] = reconciliations_df.apply(
@@ -3209,6 +3361,7 @@ def analyze_company_quarters(
         "sources": sources_df,
         "evidence": evidence_df,
         "warnings": warnings_df,
+        "request_events": request_events_df,
     }
 
 
